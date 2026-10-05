@@ -16,7 +16,10 @@
     "PUBLIC_ORIGIN": "https://mcp.vespoli.me",
     "MCP_PATH": "/ghcaretaker",
     "GITHUB_OWNER": "susanbeasles",
-    "GITHUB_OWNER_ID": "215839550"
+    "GITHUB_OWNER_ID": "215839550",
+    "SETUP_ACCESS_AUD": "0c12fa9a826623d029374932723e1a82ba7a2d8316d03196ed200c674c9e39b2",
+    "SETUP_ACCESS_ISSUER": "https://vespoli.cloudflareaccess.com",
+    "SETUP_OWNER_EMAIL": "anthonyvespoli@gmail.com"
   },
   "r2_buckets": [
     {
