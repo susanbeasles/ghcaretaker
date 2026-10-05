@@ -1,0 +1,40 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ghcaretaker",
+  "main": "src/worker.mjs",
+  "compatibility_date": "2026-10-05",
+  "workers_dev": false,
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "vars": {
+    "PUBLIC_ORIGIN": "https://github-caretaker.example.com",
+    "GITHUB_OWNER": "susanbeasles",
+    "GITHUB_APP_ID": "REPLACE_APP_ID",
+    "GITHUB_INSTALLATION_ID": "REPLACE_INSTALLATION_ID",
+    "AUTH_ISSUER": "https://REPLACE_AUTHORIZATION_SERVER",
+    "AUTH_JWKS_URL": "https://REPLACE_AUTHORIZATION_SERVER/.well-known/jwks.json",
+    "AUTH_SUBJECT": "REPLACE_PINNED_OWNER_SUBJECT"
+  },
+  "r2_buckets": [
+    {
+      "binding": "AUDIT_BUCKET",
+      "bucket_name": "ghcaretaker-audit"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "AUDIT_DB",
+      "database_name": "ghcaretaker-audit",
+      "database_id": "REPLACE_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "routes": [
+    {
+      "pattern": "github-caretaker.example.com",
+      "custom_domain": true
+    }
+  ]
+}
