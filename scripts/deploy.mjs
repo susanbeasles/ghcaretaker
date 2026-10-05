@@ -28,6 +28,38 @@ if (!binding.id) {
   }
 }
 
+
+// Explicit R2 provisioning: never inherit an absent audit binding.
+const auditBucket = c.r2_buckets.find(x => x.binding === 'AUDIT_BUCKET');
+if (!auditBucket) throw Error('Missing AUDIT_BUCKET binding');
+
+const bucketName = 'ghcaretaker-audit';
+const bucketListing = execFileSync(
+  process.execPath,
+  [cli, 'r2', 'bucket', 'list'],
+  {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'inherit'],
+    env: {...process.env, NO_COLOR: '1', FORCE_COLOR: '0'}
+  }
+);
+
+const bucketNames = [...bucketListing.matchAll(
+  /^name:\s+([a-z0-9-]+)\s*$/gm
+)].map(match => match[1]);
+
+if (!bucketNames.includes(bucketName)) {
+  execFileSync(
+    process.execPath,
+    [cli, 'r2', 'bucket', 'create', bucketName],
+    {stdio: 'inherit'}
+  );
+}
+
+auditBucket.bucket_name = bucketName;
+fs.writeFileSync('wrangler.jsonc', JSON.stringify(c, null, 2) + '\n');
+console.log('Explicitly bound audit bucket:', bucketName);
+
 execFileSync(process.execPath, [cli, 'deploy'], {stdio:'inherit'});
 execFileSync(process.execPath, [
   cli, 'd1', 'migrations', 'apply', 'ghcaretaker-audit', '--remote'
