@@ -78,7 +78,22 @@ export default {
     }});
    }
    return await oauth.fetch(request,env,ctx);
-  }catch{
+  }catch(error){
+   const known = new Set([
+    'Configure owner-only Cloudflare Access before setup',
+    'Invalid Access issuer',
+    'Access authentication required',
+    'Invalid Access token',
+    'Invalid Access signature',
+    'Access unavailable',
+    'Unknown Access key',
+    'Owner-only Access identity required'
+   ]);
+   console.error(JSON.stringify({
+    category:'setup_rejected',
+    correlation_id:correlation,
+    reason:known.has(error?.message)?error.message:'Other setup or authorization failure'
+   }));
    try{await audit(env,{correlation_id:correlation,category:'credential',phase:'rejected',operation:u.pathname.startsWith(base+'/setup')?'setup':'oauth',status:403});}catch{console.error(JSON.stringify({category:'audit_or_internal_failure',correlation_id:correlation}));return Response.json({error:'Audit unavailable',correlation_id:correlation},{status:503});}
    return Response.json({error:'Setup or authorization stopped. Inspect the audit trail.',correlation_id:correlation},{status:403,headers:{'Cache-Control':'no-store'}});
   }
