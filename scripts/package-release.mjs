@@ -1,0 +1,15 @@
+import {execFileSync} from 'node:child_process';
+import fs from 'node:fs';
+import {createHash} from 'node:crypto';
+const version=JSON.parse(fs.readFileSync('package.json')).version,tag='v'+version;
+if(!/^\d+\.\d+\.\d+-beta\.\d+$/.test(version))throw Error('Expected SemVer beta version');
+if(execFileSync('git',['status','--porcelain'],{encoding:'utf8'}).trim())throw Error('Commit all tracked and untracked changes before packaging');
+execFileSync('git',['verify-tag',tag],{stdio:'inherit'});
+const tagCommit=execFileSync('git',['rev-parse',tag+'^{commit}'],{encoding:'utf8'}).trim();
+const head=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();if(tagCommit!==head)throw Error('Release tag must point to current HEAD');
+fs.mkdirSync('releases',{recursive:true});
+const asset='ghcaretaker-'+version+'.zip',output='releases/'+asset;
+execFileSync('git',['archive','--format=zip','--prefix=ghcaretaker/','--output='+output,tag]);
+const hash=createHash('sha256').update(fs.readFileSync(output)).digest('hex');
+fs.writeFileSync('releases/SHA256SUMS',hash+'  '+asset+'\n');
+console.log('Packaged '+output+' from '+tagCommit);

@@ -1,0 +1,8 @@
+{
+ "name":"Personal GitHub Caretaker",
+ "url":"https://github-caretaker.example.com",
+ "public":false,
+ "hook_attributes":{"active":false},
+ "default_permissions":{"contents":"read","metadata":"read","actions":"read","issues":"write","pull_requests":"write"},
+ "default_events":[]
+}

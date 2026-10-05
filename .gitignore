@@ -1,0 +1,80 @@
+# Dependencies and package-manager state; keep package-lock.json tracked.
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/cache/
+.yarn/unplugged/
+.yarn/install-state.gz
+.pnp.*
+
+# Cloudflare local state, build outputs and audit exports.
+.wrangler/
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+!.env.example
+dist/
+build/
+coverage/
+.nyc_output/
+.tmp/
+tmp/
+logs/
+audit-exports/
+*.log
+*.tsbuildinfo
+
+# Signing and account credentials; never store these in the repository.
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+credentials*.json
+secrets*.json
+
+# Local SQL databases, dumps and archives.
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
+*.dump
+*.sql.gz
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+
+# Release assets and generated repository-policy payloads.
+releases/
+.bootstrap/
+
+# Editors and operating-system metadata.
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+.AppleDouble/
+.LSOverride
+._*
+Thumbs.db
+Desktop.ini
+
+# Local credential stores and edit leftovers.
+.npmrc
+.ssh/
+.aws/
+.azure/
+.gcloud/
+auth.json
+*.bak
+*.orig
+*.rej

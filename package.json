@@ -1,0 +1,39 @@
+{
+  "name": "ghcaretaker",
+  "version": "0.0.1-beta.1",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "check": "node scripts/check.mjs",
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "smoke": "node scripts/smoke.mjs",
+    "release:package": "node scripts/package-release.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "4.147.0"
+  },
+  "description": "Audited personal GitHub MCP connector: read-only repository contents, scoped collaboration tools.",
+  "author": "Anthony Vespoli",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/susanbeasles/ghcaretaker.git"
+  },
+  "bugs": {
+    "url": "https://github.com/susanbeasles/ghcaretaker/issues"
+  },
+  "homepage": "https://github.com/susanbeasles/ghcaretaker#readme",
+  "keywords": [
+    "github-app",
+    "mcp",
+    "cloudflare-workers",
+    "audit",
+    "read-only"
+  ]
+}
