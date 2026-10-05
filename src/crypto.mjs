@@ -3,6 +3,7 @@ export const b64=b=>btoa(String.fromCharCode(...new Uint8Array(b))).replaceAll('
 export const unb64=s=>Uint8Array.from(atob(s.replaceAll('-','+').replaceAll('_','/')),c=>c.charCodeAt(0));
 export async function hash(s){return b64(await crypto.subtle.digest('SHA-256',te.encode(s)));}
 export async function appJWT(env){
+ if(env.APP_VAULT)return env.APP_VAULT.get(env.APP_VAULT.idFromName('personal-app')).appJWT();
  const key=await crypto.subtle.importKey('pkcs8',unb64(env.GITHUB_APP_PRIVATE_KEY.replace(/-----[^-]+-----|\s/g,'')),{name:'RSASSA-PKCS1-v1_5',hash:'SHA-256'},false,['sign']);
  const now=Math.floor(Date.now()/1000), input=b64(te.encode(JSON.stringify({alg:'RS256',typ:'JWT'})))+'.'+b64(te.encode(JSON.stringify({iat:now-60,exp:now+540,iss:env.GITHUB_APP_ID})));
  return input+'.'+b64(await crypto.subtle.sign('RSASSA-PKCS1-v1_5',key,te.encode(input)));
@@ -19,7 +20,7 @@ export async function authenticate(request,env,fetcher=fetch){
  const key=await crypto.subtle.importKey('jwk',candidates[0],{name:'RSASSA-PKCS1-v1_5',hash:'SHA-256'},false,['verify']);
  if(!await crypto.subtle.verify('RSASSA-PKCS1-v1_5',key,unb64(parts[2]),te.encode(parts[0]+'.'+parts[1]))) throw Error('Invalid signature');
  const c=JSON.parse(new TextDecoder().decode(unb64(parts[1]))), now=Math.floor(Date.now()/1000);
- if(c.iss!==env.AUTH_ISSUER||!(Array.isArray(c.aud)?c.aud:[c.aud]).includes(env.PUBLIC_ORIGIN+'/mcp')||c.sub!==env.AUTH_SUBJECT||!Number.isFinite(c.exp)||c.exp<=now||c.nbf!==undefined&&(!Number.isFinite(c.nbf)||c.nbf>now)) throw Error('Invalid identity, audience or lifetime');
+ if(c.iss!==env.AUTH_ISSUER||!(Array.isArray(c.aud)?c.aud:[c.aud]).includes(env.PUBLIC_ORIGIN+(env.MCP_PATH||'/mcp'))||c.sub!==env.AUTH_SUBJECT||!Number.isFinite(c.exp)||c.exp<=now||c.nbf!==undefined&&(!Number.isFinite(c.nbf)||c.nbf>now)) throw Error('Invalid identity, audience or lifetime');
  const scopes=typeof c.scope==='string'?c.scope.split(' '):[]; if(!scopes.includes('github:read')) throw Error('Read scope required');
  return {subject:c.sub,scopes};
 }

@@ -11,8 +11,10 @@ test('owner exemption never weakens separate main/signature/tag rules',()=>{
  const pr=review.rules.find(r=>r.type==='pull_request');assert.equal(pr.parameters.required_approving_review_count,1);assert.equal(pr.parameters.require_last_push_approval,true);
  assert.throws(()=>rulesets(NaN));
 });
-test('production check refuses placeholders and unmatched origins; accepts a configured deployment',()=>{
- const c=config();assert.throws(()=>check(c,true));
- const ready=structuredClone(c);ready.vars={PUBLIC_ORIGIN:'https://caretaker.test',GITHUB_OWNER:'susanbeasles',GITHUB_APP_ID:'123',GITHUB_INSTALLATION_ID:'456',AUTH_ISSUER:'https://auth.test/',AUTH_JWKS_URL:'https://auth.test/keys',AUTH_SUBJECT:'owner'};ready.d1_databases[0].database_id='11111111-1111-4111-8111-111111111111';ready.routes=[{pattern:'caretaker.test',custom_domain:true}];
- assert.doesNotThrow(()=>check(ready,true));ready.routes=[];assert.throws(()=>check(ready,true));
+test('production check enforces the owner, vault and scoped shared-host route',()=>{
+ const c=config();assert.doesNotThrow(()=>check(c,true));
+ for(const patch of [{PUBLIC_ORIGIN:'https://other.test'},{GITHUB_OWNER_ID:'42'},{MCP_PATH:'/mcp'}]){
+  const x=structuredClone(c);Object.assign(x.vars,patch);assert.throws(()=>check(x,true));
+ }
+ const x=structuredClone(c);x.routes.push({pattern:'mcp.vespoli.me/*'});assert.throws(()=>check(x,true));
 });

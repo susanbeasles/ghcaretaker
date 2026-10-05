@@ -6,4 +6,6 @@ Repository contents remain read-only. Writable issue and PR operations can affec
 
 Review the security boundaries and deployment acceptance checks in [README.md](README.md). Signed commits and locked tags do not prevent a repository administrator from changing repository settings or rulesets. Protect your GitHub and Cloudflare administrative identities independently.
 
-The GitHub App signing key belongs in Cloudflare Worker secrets, not GitHub repository secrets or Git. The Cloudflare deployment token belongs in the protected production GitHub environment. Audit records can contain private source code; keep the R2 bucket private.
+The GitHub App signing key and OAuth client secret stay in the private Cloudflare Durable Object credential vault. It has no public HTTP interface and no secret-export RPC method. The Cloudflare deployment credential remains in Cloudflare Workers Builds. Owner-only Cloudflare Access protects installation; the public MCP endpoint uses PKCE OAuth and a pinned numeric GitHub owner. Audit records can contain private source code; keep the R2 bucket private.
+
+Platform invocation logs are disabled to avoid capturing authorization callback query strings. Application logs contain only structured, redacted audit metadata. Do not enable full URL or body tracing on the OAuth or setup paths. See [SETUP.md](SETUP.md) for the remaining deployment trust and recovery limits.

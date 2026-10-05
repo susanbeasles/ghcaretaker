@@ -1,0 +1,20 @@
+import {OAuthAuthorizationServer} from '@cloudflare/workers-oauth-provider';
+const assert={equal(a,b){if(a!==b)throw Error('Equality assertion failed: '+a+' vs '+b);},deepEqual(a,b){if(JSON.stringify(a)!==JSON.stringify(b))throw Error('Deep equality failed');},async rejects(p){try{await p;}catch{return;}throw Error('Expected rejection');}};
+const hash=async value=>btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))))).replaceAll('+','-').replaceAll('/','_').replace(/=+$/,'');
+export default {async fetch(req,env){
+ const issuer='https://mcp.vespoli.me/ghcaretaker/auth',resource='https://mcp.vespoli.me/ghcaretaker',environment=env;
+ const provider=new OAuthAuthorizationServer({issuer,resources:[resource],authorizeEndpoint:issuer+'/authorize',tokenEndpoint:issuer+'/token',scopesSupported:['github:read'],accessTokenTTL:300,refreshTokenTTL:86400,clientIdMetadataDocumentEnabled:false});
+ const api=provider.getOAuthApi(environment),client=await api.createClient({clientName:'Test client',redirectUris:['https://client.test/callback'],tokenEndpointAuthMethod:'none',grantTypes:['authorization_code','refresh_token'],responseTypes:['code']});
+ const verifier='a'.repeat(64),url=new URL(issuer+'/authorize');url.search=new URLSearchParams({client_id:client.clientId,redirect_uri:'https://client.test/callback',response_type:'code',state:'client-state',scope:'github:read',resource,code_challenge:await hash(verifier),code_challenge_method:'S256'});
+ const request=await api.parseAuthRequest(new Request(url));
+ const complete=await api.completeAuthorization({request,userId:'215839550',scope:['github:read'],metadata:{},props:{subject:'215839550'}});
+ const code=new URL(complete.redirectTo).searchParams.get('code');assert.equal(new URL(complete.redirectTo).searchParams.get('state'),'client-state');
+ const tokenRequest=proof=>new Request(issuer+'/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'authorization_code',client_id:client.clientId,redirect_uri:'https://client.test/callback',resource,code,code_verifier:proof})});
+ const ctx={waitUntil(){}};assert.equal((await provider.fetch(tokenRequest('b'.repeat(64)),environment,ctx)).status,400);
+ const r=await provider.fetch(tokenRequest(verifier),environment,ctx);assert.equal(r.status,200);const token=await r.json();
+ const verified=await provider.validateToken(resource,token.access_token,environment);assert.equal(verified.userId,'215839550');assert.equal(verified.props.subject,'215839550');assert.deepEqual(verified.scope,['github:read']);assert.equal(verified.audience,resource);
+ assert.equal((await provider.fetch(tokenRequest(verifier),environment,ctx)).status,400);
+ await assert.rejects(provider.validateToken(resource+'/other',token.access_token,environment));
+ assert.equal(await provider.validateToken(resource,'fake',environment),null);
+return Response.json({passed:true});
+}};

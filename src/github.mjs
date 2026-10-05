@@ -15,7 +15,7 @@ export async function github(env,identity,name,args,correlation,fetcher=fetch){
  async function call(path,method,token,body,operation,credential=false){
   await audit(env,{correlation_id:correlation,category:'success',phase:'intent',operation,request:{method,path,body}});
   let response,text;
-  try{response=await fetcher('https://api.github.com'+path,{method,redirect:'error',signal:AbortSignal.timeout(20000),headers:{Authorization:'Bearer '+token,Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2026-03-10','User-Agent':'ghcaretaker/0.0.1-beta.1',...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});text=await bounded(response);}
+  try{response=await fetcher('https://api.github.com'+path,{method,redirect:'error',signal:AbortSignal.timeout(20000),headers:{Authorization:'Bearer '+token,Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2026-03-10','User-Agent':'ghcaretaker/0.0.1-beta.2',...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});text=await bounded(response);}
   catch{await audit(env,{correlation_id:correlation,category:'error',phase:'uncertain',operation,response:{message:'Network failure, redirect, timeout or oversized response. Mutation outcome may be unknown.'}});throw new UpstreamError(502,'error');}
   let data;try{data=JSON.parse(text);}catch{data={text};}
   const cat=category(response.status,response.headers);

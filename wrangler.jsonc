@@ -1,21 +1,22 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "ghcaretaker",
-  "main": "src/worker.mjs",
+  "main": "src/index.mjs",
   "compatibility_date": "2026-10-05",
   "workers_dev": false,
   "observability": {
     "enabled": true,
-    "head_sampling_rate": 1
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "invocation_logs": false
+    }
   },
   "vars": {
-    "PUBLIC_ORIGIN": "https://github-caretaker.example.com",
+    "PUBLIC_ORIGIN": "https://mcp.vespoli.me",
+    "MCP_PATH": "/ghcaretaker",
     "GITHUB_OWNER": "susanbeasles",
-    "GITHUB_APP_ID": "REPLACE_APP_ID",
-    "GITHUB_INSTALLATION_ID": "REPLACE_INSTALLATION_ID",
-    "AUTH_ISSUER": "https://REPLACE_AUTHORIZATION_SERVER",
-    "AUTH_JWKS_URL": "https://REPLACE_AUTHORIZATION_SERVER/.well-known/jwks.json",
-    "AUTH_SUBJECT": "REPLACE_PINNED_OWNER_SUBJECT"
+    "GITHUB_OWNER_ID": "215839550"
   },
   "r2_buckets": [
     {
@@ -27,14 +28,46 @@
     {
       "binding": "AUDIT_DB",
       "database_name": "ghcaretaker-audit",
-      "database_id": "REPLACE_DATABASE_ID",
       "migrations_dir": "migrations"
     }
   ],
   "routes": [
     {
-      "pattern": "github-caretaker.example.com",
-      "custom_domain": true
+      "pattern": "mcp.vespoli.me/ghcaretaker*",
+      "zone_name": "vespoli.me"
+    },
+    {
+      "pattern": "mcp.vespoli.me/.well-known/oauth-protected-resource/ghcaretaker*",
+      "zone_name": "vespoli.me"
+    },
+    {
+      "pattern": "mcp.vespoli.me/.well-known/oauth-authorization-server/ghcaretaker/auth*",
+      "zone_name": "vespoli.me"
     }
+  ],
+  "keep_vars": true,
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "APP_VAULT",
+        "class_name": "AppVault"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "AppVault"
+      ]
+    }
+  ],
+  "compatibility_flags": [
+    "global_fetch_strictly_public"
   ]
 }
