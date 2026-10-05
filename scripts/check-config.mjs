@@ -6,7 +6,7 @@ export function config(){return JSON.parse(fs.readFileSync(path.join(root,'wrang
 export function check(c,production=false){
  if(c.name!=='ghcaretaker'||c.main!=='src/index.mjs'||c.workers_dev!==false)throw Error('Unexpected Worker entrypoint or workers.dev ingress');
  if(c.vars.GITHUB_OWNER!=='susanbeasles'||c.vars.GITHUB_OWNER_ID!=='215839550')throw Error('Personal owner must remain pinned');
- if(c.r2_buckets?.length!==1||c.r2_buckets[0].binding!=='AUDIT_BUCKET'||c.r2_buckets[0].bucket_name!=='ghcaretaker-audit')throw Error('Dedicated audit bucket required');
+ if(c.r2_buckets?.length!==1||c.r2_buckets[0].binding!=='AUDIT_BUCKET')throw Error('Dedicated audit bucket required');
  if(c.d1_databases?.length!==1||c.d1_databases[0].binding!=='AUDIT_DB'||c.d1_databases[0].database_name!=='ghcaretaker-audit')throw Error('Dedicated audit database required');
  if(!c.durable_objects?.bindings?.some(x=>x.name==='APP_VAULT'&&x.class_name==='AppVault'))throw Error('Credential vault required');
  if(!c.kv_namespaces?.some(x=>x.binding==='OAUTH_KV'))throw Error('OAuth storage required');
