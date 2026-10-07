@@ -35,5 +35,13 @@
     "cloudflare-workers",
     "audit",
     "read-only"
-  ]
+  ],
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "1.2.1"
+  },
+  "overrides": {
+    "miniflare": {
+      "sharp": "0.35.5"
+    }
+  }
 }
