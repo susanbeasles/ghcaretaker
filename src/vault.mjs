@@ -9,6 +9,4 @@ export class AppVault extends DurableObject{
  install(){return this.core.install();}
  appJWT(){return this.core.appJWT();}
  config(){return this.core.config();}
- clientID(){return this.core.clientID();}
- identify(code,verifier){return this.core.identify(code,verifier);}
 }

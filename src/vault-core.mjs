@@ -59,20 +59,4 @@ export class VaultCore{
   await this.storage.put('installation',String(matches[0].id));await this.storage.put('phase','installed');await this.record('success','installation_verified',200);return this.status();
  }
  async config(){const s=await this.status();if(s.phase!=='installed')throw Error('App installation is incomplete');return {GITHUB_APP_ID:String(s.app_id),GITHUB_INSTALLATION_ID:s.installation_id};}
- async clientID(){const a=await this.storage.get('app');if(await this.storage.get('phase')!=='installed')throw Error('App installation is incomplete');return a.client_id;}
- async identify(code,verifier){
-  if(!/^[a-zA-Z0-9_\-]{1,256}$/.test(code||'')||typeof verifier!=='string'||verifier.length>256)throw Error('Invalid authorization callback');
-  const a=await this.storage.get('app');if(await this.storage.get('phase')!=='installed')throw Error('App installation is incomplete');
-  await this.record('success','owner_login_intent',0);
-  const data=await this.call('https://github.com/login/oauth/access_token',{method:'POST',headers:{Accept:'application/json','Content-Type':'application/json'},body:JSON.stringify({client_id:a.client_id,client_secret:a.client_secret,code,code_verifier:verifier,redirect_uri:resource(this.env)+'/auth/callback'})});
-  if(typeof data.access_token!=='string')throw Error('GitHub login rejected');
-  let user;
-  try{user=await this.call('https://api.github.com/user',{headers:this.headers(data.access_token)});}
-  finally{
-   // Login tokens are not retained. Revoke immediately before issuing any MCP grant.
-   await this.call('https://api.github.com/applications/'+a.client_id+'/token',{method:'DELETE',headers:{Authorization:'Basic '+btoa(a.client_id+':'+a.client_secret),Accept:'application/vnd.github+json','Content-Type':'application/json','User-Agent':'ghcaretaker'},body:JSON.stringify({access_token:data.access_token})});
-  }
-  if(String(user.id)!==this.env.GITHUB_OWNER_ID||user.login?.toLowerCase()!==this.env.GITHUB_OWNER||user.type!=='User'){await this.record('credential','owner_login_denied',403);throw Error('Only the pinned personal GitHub account may authorize');}
-  await this.record('success','owner_login_verified',200);return {subject:String(user.id)};
- }
 }

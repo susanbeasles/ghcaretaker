@@ -1,4 +1,3 @@
-import {authenticate} from './crypto.mjs';
 import {tools,validate} from './policy.mjs';
 import {audit,recent,readRecord} from './audit.mjs';
 import {github,UpstreamError} from './github.mjs';
@@ -18,7 +17,7 @@ export async function handle(request,env,dependencies={}){
  if(request.headers.get('origin')&&request.headers.get('origin')!==env.PUBLIC_ORIGIN) return json({error:'Origin denied'},403);
  try{
   let identity;
-  try{identity=await (dependencies.authenticate||authenticate)(request,env);}
+  try{identity=await (dependencies.authenticate||async function(){throw Error('Central gate required');})(request,env);}
   catch{await audit(env,{correlation_id:correlation,category:'credential',phase:'rejected',operation:'client_authentication',status:401});return json({error:'Authentication failed',correlation_id:correlation},401,{'WWW-Authenticate':'Bearer resource_metadata="'+env.PUBLIC_ORIGIN+'/.well-known/oauth-protected-resource'+endpoint+'"'});}
   if(request.method==='GET'||request.method==='DELETE')return new Response(null,{status:405,headers:{Allow:'POST'}});
   if(request.method!=='POST')return json({error:'Method denied'},405);

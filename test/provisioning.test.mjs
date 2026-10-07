@@ -32,23 +32,3 @@ test('GitHub PKCS1 key normalization produces a usable PKCS8 key',async()=>{
  const {generateKeyPairSync}=await import('node:crypto');const {privateKey}=generateKeyPairSync('rsa',{modulusLength:2048,privateKeyEncoding:{type:'pkcs1',format:'pem'},publicKeyEncoding:{type:'spki',format:'pem'}});
  const normalized=normalizeKey(privateKey);assert.match(normalized,/BEGIN PRIVATE KEY/);assert.equal((await appJWT({GITHUB_APP_ID:'123',GITHUB_APP_PRIVATE_KEY:normalized})).split('.').length,3);
 });
-test('login token is revoked and only the pinned numeric GitHub owner is accepted',async()=>{
- const s=storage();await s.put('app',app());await s.put('phase','installed');let revoke=0;
- const v=new VaultCore(s,env,async(url,opts)=>{
-  if(url==='https://github.com/login/oauth/access_token'){assert.equal(JSON.parse(opts.body).redirect_uri,'https://mcp.vespoli.me/ghcaretaker/auth/callback');return Response.json({access_token:'never-persist'});}
-  if(url==='https://api.github.com/user')return Response.json({id:42,login:'susanbeasles',type:'User'});
-  assert.equal(opts.method,'DELETE');revoke++;return new Response(null,{status:204});
- });
- await assert.rejects(v.identify('code','verifier'));assert.equal(revoke,1);assert.ok(!JSON.stringify(await s.get('app')).includes('never-persist'));
-});
-import {bootstrapIdentity} from '../src/bootstrap.mjs';
-import {b64} from '../src/crypto.mjs';
-test('installation Access JWT enforces signature, issuer, audience, email and lifetime',async()=>{
- const pair=await crypto.subtle.generateKey({name:'RSASSA-PKCS1-v1_5',modulusLength:2048,publicExponent:new Uint8Array([1,0,1]),hash:'SHA-256'},true,['sign','verify']),jwk=await crypto.subtle.exportKey('jwk',pair.publicKey);jwk.kid='fixed';
- const e={SETUP_ACCESS_ISSUER:'https://owner.cloudflareaccess.com',SETUP_ACCESS_AUD:'setup-only',SETUP_OWNER_EMAIL:'owner@test.invalid'},claims={iss:e.SETUP_ACCESS_ISSUER,aud:['setup-only'],email:e.SETUP_OWNER_EMAIL,sub:'owner',nbf:Date.now()/1000-10,exp:Date.now()/1000+120};
- async function req(patch={}){const enc=new TextEncoder(),input=b64(enc.encode(JSON.stringify({alg:'RS256',kid:'fixed'})))+'.'+b64(enc.encode(JSON.stringify({...claims,...patch})));const token=input+'.'+b64(await crypto.subtle.sign('RSASSA-PKCS1-v1_5',pair.privateKey,enc.encode(input)));return new Request('https://mcp.vespoli.me/ghcaretaker/setup',{headers:{'Cf-Access-Jwt-Assertion':token}});}
- const fetcher=async(url,opts)=>{assert.equal(url,e.SETUP_ACCESS_ISSUER+'/cdn-cgi/access/certs');assert.equal(opts.redirect,'error');return Response.json({keys:[jwk]});};
- assert.equal(await bootstrapIdentity(await req(),e,fetcher),'owner');
- for(const bad of [{iss:'https://attacker.cloudflareaccess.com'},{aud:['different-app']},{email:'attacker@test.invalid'},{exp:0},{nbf:Date.now()/1000+600}])await assert.rejects(bootstrapIdentity(await req(bad),e,fetcher));
- await assert.rejects(bootstrapIdentity(await req(),{},fetcher));
-});

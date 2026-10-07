@@ -1,56 +1,48 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
   "name": "ghcaretaker",
+  "account_id": "1a799c6e699d2ef7e87398692ce3ad7b",
   "main": "src/index.mjs",
   "compatibility_date": "2026-10-05",
+  "compatibility_flags": [
+    "global_fetch_strictly_public"
+  ],
   "workers_dev": false,
+  "keep_vars": true,
   "observability": {
     "enabled": true,
+    "head_sampling_rate": 1,
+    "redact_query_string": true,
     "logs": {
       "enabled": true,
       "head_sampling_rate": 1,
+      "persist": true,
       "invocation_logs": false
+    },
+    "traces": {
+      "enabled": false,
+      "persist": true,
+      "head_sampling_rate": 1
     }
   },
   "vars": {
-    "PUBLIC_ORIGIN": "https://mcp.vespoli.me",
-    "MCP_PATH": "/ghcaretaker",
     "GITHUB_OWNER": "susanbeasles",
     "GITHUB_OWNER_ID": "215839550",
-    "SETUP_ACCESS_AUD": "0c12fa9a826623d029374932723e1a82ba7a2d8316d03196ed200c674c9e39b2",
-    "SETUP_ACCESS_ISSUER": "https://vespoli.cloudflareaccess.com",
-    "SETUP_OWNER_EMAIL": "anthonyvespoli@gmail.com"
+    "MCP_PATH": "/ghcaretaker",
+    "PUBLIC_ORIGIN": "https://mcp.vespoli.me",
+    "AUTH_ORIGIN": "https://control.vespoli.me"
   },
   "r2_buckets": [
     {
-      "binding": "AUDIT_BUCKET"
+      "binding": "AUDIT_BUCKET",
+      "bucket_name": "ghcaretaker-audit"
     }
   ],
   "d1_databases": [
     {
       "binding": "AUDIT_DB",
       "database_name": "ghcaretaker-audit",
+      "database_id": "02b01e07-fea9-4ee3-8801-fde7a7d14199",
       "migrations_dir": "migrations"
-    }
-  ],
-  "routes": [
-    {
-      "pattern": "mcp.vespoli.me/ghcaretaker*",
-      "zone_name": "vespoli.me"
-    },
-    {
-      "pattern": "mcp.vespoli.me/.well-known/oauth-protected-resource/ghcaretaker*",
-      "zone_name": "vespoli.me"
-    },
-    {
-      "pattern": "mcp.vespoli.me/.well-known/oauth-authorization-server/ghcaretaker/auth*",
-      "zone_name": "vespoli.me"
-    }
-  ],
-  "keep_vars": true,
-  "kv_namespaces": [
-    {
-      "binding": "OAUTH_KV"
     }
   ],
   "durable_objects": {
@@ -69,7 +61,27 @@
       ]
     }
   ],
-  "compatibility_flags": [
-    "global_fetch_strictly_public"
+  "triggers": {
+    "crons": []
+  },
+  "services": [
+    {
+      "binding": "AUTH_GATEWAY",
+      "service": "personal-control"
+    }
+  ],
+  "routes": [
+    {
+      "pattern": "mcp.vespoli.me/ghcaretaker*",
+      "zone_name": "vespoli.me"
+    },
+    {
+      "pattern": "mcp.vespoli.me/.well-known/oauth-protected-resource/ghcaretaker*",
+      "zone_name": "vespoli.me"
+    },
+    {
+      "pattern": "mcp.vespoli.me/.well-known/oauth-authorization-server/ghcaretaker/auth*",
+      "zone_name": "vespoli.me"
+    }
   ]
 }

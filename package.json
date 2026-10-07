@@ -35,8 +35,5 @@
     "cloudflare-workers",
     "audit",
     "read-only"
-  ],
-  "dependencies": {
-    "@cloudflare/workers-oauth-provider": "1.2.1"
-  }
+  ]
 }

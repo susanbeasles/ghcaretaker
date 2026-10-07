@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {permissions,tools,route,validate} from '../src/policy.mjs';
 import {redact} from '../src/audit.mjs';
 import {inlineFile,envelope,guard,suspicious} from '../src/content.mjs';
-import {authenticate,b64} from '../src/crypto.mjs';
+import {b64} from '../src/crypto.mjs';
 import {handle} from '../src/worker.mjs';
 const owner='personal';
 test('only collaboration routes can write; code/admin/merge/dispatch tools do not exist',()=>{
@@ -39,24 +39,7 @@ test('credential fields and common embedded credentials are redacted',()=>{
  const v=redact({token:'abc',nested:{Authorization:'secret',body:'ghp_abc123 Bearer abc.def.ghi'}});
  assert.equal(v.token,'[REDACTED]');assert.ok(!JSON.stringify(v).includes('abc123'));assert.ok(!JSON.stringify(v).includes('abc.def.ghi'));
 });
-async function signed(claims,headerPatch={}){
- const pair=await crypto.subtle.generateKey({name:'RSASSA-PKCS1-v1_5',modulusLength:2048,publicExponent:new Uint8Array([1,0,1]),hash:'SHA-256'},true,['sign','verify']);
- const jwk=await crypto.subtle.exportKey('jwk',pair.publicKey);jwk.kid='fixed';
- const te=new TextEncoder(),s=b64(te.encode(JSON.stringify({alg:'RS256',kid:'fixed',...headerPatch})))+'.'+b64(te.encode(JSON.stringify(claims)));
- return {token:s+'.'+b64(await crypto.subtle.sign('RSASSA-PKCS1-v1_5',pair.privateKey,te.encode(s))),jwk};
-}
-const authEnv={AUTH_ISSUER:'https://auth.test',AUTH_JWKS_URL:'https://auth.test/keys',AUTH_SUBJECT:'owner-id',PUBLIC_ORIGIN:'https://worker.test'};
-test('JWT signature, algorithm, owner, audience, expiry, issuer and scope are enforced',async()=>{
- const claims={iss:authEnv.AUTH_ISSUER,aud:'https://worker.test/mcp',sub:'owner-id',exp:Date.now()/1000+100,scope:'github:read'};
- const good=await signed(claims);const req=token=>new Request('https://worker.test/mcp',{headers:{Authorization:'Bearer '+token}});
- const fetcher=async (url,opts)=>{assert.equal(String(url),authEnv.AUTH_JWKS_URL);assert.equal(opts.redirect,'error');return Response.json({keys:[good.jwk]});};
- assert.equal((await authenticate(req(good.token),authEnv,fetcher)).subject,'owner-id');
- await assert.rejects(authenticate(req(good.token.slice(0,-3)+'abc'),authEnv,fetcher));
- for(const patch of [{sub:'other'},{iss:'https://evil'},{aud:'other'},{exp:0},{exp:undefined},{scope:''}]){
-  const x=await signed({...claims,...patch});await assert.rejects(authenticate(req(x.token),authEnv,async()=>Response.json({keys:[x.jwk]})));
- }
- const x=await signed(claims,{alg:'none'});await assert.rejects(authenticate(req(x.token),authEnv,async()=>Response.json({keys:[x.jwk]})));
-});
+const authEnv={PUBLIC_ORIGIN:'https://worker.test'};
 function env(fail=false){const events=[];return {...authEnv,events,AUDIT_BUCKET:{async put(key,body){if(fail)throw Error('offline');events.push(JSON.parse(body));}},AUDIT_DB:{prepare(){return {bind(){return this;},async run(){},async all(){return {results:[]};}}}}};}
 const request=(name,args={})=>new Request('https://worker.test/mcp',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name,arguments:args}})});
 test('read scope cannot write; audit outage stops before upstream; invalid credentials surface separately',async()=>{

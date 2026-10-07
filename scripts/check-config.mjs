@@ -9,7 +9,7 @@ export function check(c,production=false){
  if(c.r2_buckets?.length!==1||c.r2_buckets[0].binding!=='AUDIT_BUCKET')throw Error('Dedicated audit bucket required');
  if(c.d1_databases?.length!==1||c.d1_databases[0].binding!=='AUDIT_DB'||c.d1_databases[0].database_name!=='ghcaretaker-audit')throw Error('Dedicated audit database required');
  if(!c.durable_objects?.bindings?.some(x=>x.name==='APP_VAULT'&&x.class_name==='AppVault'))throw Error('Credential vault required');
- if(!c.kv_namespaces?.some(x=>x.binding==='OAUTH_KV'))throw Error('OAuth storage required');
+ if(c.vars.AUTH_ORIGIN!=='https://control.vespoli.me'||!c.services?.some(x=>x.binding==='AUTH_GATEWAY'&&x.service==='personal-control'))throw Error('Central auth gate required');
  if(!production)return;
  if(/REPLACE|example\.com/.test(JSON.stringify(c)))throw Error('Production placeholders are forbidden');
  if(c.vars.PUBLIC_ORIGIN!=='https://mcp.vespoli.me'||c.vars.MCP_PATH!=='/ghcaretaker')throw Error('Unexpected production endpoint');
