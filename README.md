@@ -21,3 +21,14 @@ npm run build
 ```
 
 `npm run deploy` is intended for the Cloudflare build environment. It deploys and provisions bindings, then applies audit migrations. Follow [SETUP.md](SETUP.md) for initial DNS routing and the owner-only installation policy. Live account deployment and ChatGPT authorization must be tested after installation; a dry run alone does not verify them.
+
+### Deployment tooling qualification
+
+The Wrangler 4.147.0 development toolchain uses a Miniflare-scoped Sharp 0.35.5
+override. On October 7, 2026, `npm audit` reported zero vulnerabilities; all 22
+tests, source/action policy checks, an isolated Wrangler dry-run bundle and a
+native Sharp SVG metadata check passed. Deployed discovery and unauthenticated
+request-denial smoke checks also passed. This tooling patch does not change
+provider permissions or deploy a Worker. Authenticated owner OAuth, live
+repository/Actions visibility and durable audit qualification remain separate
+acceptance checks.
