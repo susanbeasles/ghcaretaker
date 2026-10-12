@@ -1,47 +1,13 @@
-name: CI
-
+name: Integration validation
 on:
   push:
     branches: ['int/**']
 concurrency:
   group: integration-${{ github.repository_id }}-${{ github.ref }}
   cancel-in-progress: true
-
 permissions:
   contents: read
-
+  id-token: write
 jobs:
-  admission:
-    permissions:
-      contents: read
-      id-token: write
-    uses: susanbeasles/workflow_depot/.github/workflows/admit-integration.yml@8659f3b78f23870e78ac8f7c98f72b5d786c229a
-    with:
-      candidate_sha: ${{ github.sha }}
   validate:
-    needs: [admission]
-    name: Validate
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '24'
-          package-manager-cache: false
-      - name: Install locked dependencies without lifecycle scripts
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Install explicit Cloudflare build-tool binaries
-        run: npm rebuild esbuild workerd --ignore-scripts=false --foreground-scripts
-      - name: Check source and deployment policy
-        run: npm run check
-      - name: Security tests
-        run: npm test
-      - name: Bundle Worker without publishing
-        run: npm run build
-
+    uses: susanbeasles/workflow_depot/.github/workflows/validate-ghcaretaker.yml@a430d212d3995173fa8fe4187c0132abf12546dc
