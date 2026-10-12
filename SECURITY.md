@@ -13,3 +13,7 @@ Platform invocation logs are disabled to avoid capturing authorization callback 
 ## Shared authentication migration
 
 Owner identity and MCP sessions now come exclusively from personal-control. The previous GitHub-user OAuth issuer and standalone setup Access checks have been removed. Private capability methods receive a scoped identity from the shared gate; public routes cannot call them directly. The owner UI uses central CSRF checks and one-use action nonces. Repository policy and audit enforcement remain inside the capability.
+
+Repository-specific sessions cannot read account-wide audit records. Their installation tokens and returned repository lists remain restricted to their explicit grant. Each operation checks immutable App, installation and numeric owner identity before minting a token. Missing or malformed private session claims fail closed.
+
+The gateway's single Caretaker webhook route forwards raw JSON through the private binding. AppVault verifies the exact bytes using the existing webhook secret, bounds the body at 256 KiB and ten seconds, and stores only fixed metadata. A stalled signed prefix is not a complete delivery. Deduplication is bounded; ordinary receipt saturation cannot suppress signed installation invalidation. Webhooks never execute provider mutations or automatically restore installation authority. Explicit fresh owner verification uses a revision guard against suspension arriving during verification.

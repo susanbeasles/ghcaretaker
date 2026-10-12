@@ -2,6 +2,7 @@ import {WorkerEntrypoint} from 'cloudflare:workers';
 import {CaretakerCore} from './capability.mjs';
 export class CaretakerCapability extends WorkerEntrypoint {
   status(){return new CaretakerCore(this.env).status();}
+  webhook(request){return new CaretakerCore(this.env).webhook(request);}
   begin(owner){return new CaretakerCore(this.env).begin(owner);}
   convert(code,state,owner){return new CaretakerCore(this.env).convert(code,state,owner);}
   install(){return new CaretakerCore(this.env).install();}

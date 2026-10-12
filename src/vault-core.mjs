@@ -1,6 +1,8 @@
 import {appJWT,hash,b64,unb64} from './crypto.mjs';
 import {assertApp,resource} from './manifest.mjs';
 import {audit} from './audit.mjs';
+import {receiveWebhook,webhookStatus} from './webhook.mjs';
+import {boundedText} from './bounded.mjs';
 function der(tag,bytes){let n=bytes.length,len=n<128?[n]:n<256?[129,n]:[130,n>>8,n&255];return new Uint8Array([tag,...len,...bytes]);}
 export function normalizeKey(pem){
  if(pem.includes('BEGIN PRIVATE KEY'))return pem;
@@ -20,10 +22,11 @@ export class VaultCore{
   if(!deferResponseAudit)await this.record(r.ok?'success':r.status===401||r.status===403?'credential':'error',operation+'_response',r.status);
   if(!r.ok){await this.record(r.status===401||r.status===403?'credential':'error','app_vault_upstream',r.status);throw Error('GitHub credential operation failed');}
   if(r.status===204)return null;
-  const body=await r.text();if(body.length>262144)throw Error('Oversized credential response');return JSON.parse(body);
+  const body=await boundedText(r,262144);return JSON.parse(body);
  }
  headers(token){return {Authorization:'Bearer '+token,Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2026-03-10','User-Agent':'ghcaretaker'};}
- async status(){const a=await this.storage.get('app');return {phase:await this.storage.get('phase')||'empty',app_id:a?.id,slug:a?.slug,installation_id:await this.storage.get('installation')};}
+ async status(){const a=await this.storage.get('app');return {phase:await this.storage.get('phase')||'empty',app_id:a?.id,slug:a?.slug,installation_id:await this.storage.get('installation'),webhook:await webhookStatus(this.storage,this.env,a)};}
+ webhook(request){return receiveWebhook(this.storage,this.env,request);}
  async begin(subject){
   return this.storage.transaction(async tx=>{
    if(await tx.get('phase'))throw Error('App creation is locked; inspect setup status');
@@ -51,12 +54,23 @@ export class VaultCore{
  }
  async appJWT(){const a=await this.storage.get('app'),phase=await this.storage.get('phase');if(!a||!['created','installed'].includes(phase))throw Error('App is not provisioned');return appJWT({GITHUB_APP_ID:String(a.id),GITHUB_APP_PRIVATE_KEY:a.pem});}
  async install(){
+  const app=await this.storage.get('app'),phase=await this.storage.get('phase'),revision=await this.storage.get('installation:revision')||0;
+  if(!app||!['created','installed','installation-review-required'].includes(phase))throw Error('App is not provisioned');
+  assertApp(app,this.env);
   await this.record('success','installation_verify_intent',0);
-  const all=await this.call('https://api.github.com/app/installations?per_page=100',{headers:this.headers(await this.appJWT())});
-  const matches=all.filter(x=>String(x.account?.id)===this.env.GITHUB_OWNER_ID&&x.account?.type==='User'&&!x.suspended_at);
+  // Owner-triggered installation verification can recover a paused install;
+  // ordinary tool JWT requests stay disabled until this fresh check succeeds.
+  const jwt=await appJWT({GITHUB_APP_ID:String(app.id),GITHUB_APP_PRIVATE_KEY:app.pem});
+  const all=await this.call('https://api.github.com/app/installations?per_page=100',{headers:this.headers(jwt)});
+  if(!Array.isArray(all)||all.length>100)throw Error('Invalid installation response');
+  const matches=all.filter(x=>Number.isSafeInteger(x.id)&&x.id>0&&String(x.app_id)===String(app.id)&&String(x.account?.id)===this.env.GITHUB_OWNER_ID&&x.account?.type==='User'&&x.account?.login?.toLowerCase()===this.env.GITHUB_OWNER&&!x.suspended_at);
   if(matches.length!==1)throw Error('Install the App on the pinned personal account first');
-  const app=await this.storage.get('app');assertApp({...app,permissions:matches[0].permissions},this.env);
-  await this.storage.put('installation',String(matches[0].id));await this.storage.put('phase','installed');await this.record('success','installation_verified',200);return this.status();
+  assertApp({...app,permissions:matches[0].permissions},this.env);
+  await this.storage.transaction(async tx=>{
+   if((await tx.get('app'))?.id!==app.id||(await tx.get('installation:revision')||0)!==revision)throw Error('Installation changed during verification; verify again');
+   await tx.put('installation',String(matches[0].id));await tx.put('phase','installed');
+  });
+  await this.record('success','installation_verified',200);return this.status();
  }
  async config(){const s=await this.status();if(s.phase!=='installed')throw Error('App installation is incomplete');return {GITHUB_APP_ID:String(s.app_id),GITHUB_INSTALLATION_ID:s.installation_id};}
 }

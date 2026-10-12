@@ -2,6 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {rulesets} from '../scripts/rulesets.mjs';
 import {check,config} from '../scripts/check-config.mjs';
+import {spawnSync} from 'node:child_process';
 test('owner exemption never weakens separate main/signature/tag rules',()=>{
  const rs=rulesets(42),main=rs.find(r=>r.name==='ghcaretaker-main-integrity'),review=rs.find(r=>r.name==='ghcaretaker-main-review'),tags=rs.find(r=>r.target==='tag');
  assert.deepEqual(main.bypass_actors,[]);assert.deepEqual(tags.bypass_actors,[]);
@@ -17,4 +18,8 @@ test('production check enforces the owner, vault and scoped shared-host route',(
   const x=structuredClone(c);Object.assign(x.vars,patch);assert.throws(()=>check(x,true));
  }
  const x=structuredClone(c);x.routes.push({pattern:'mcp.vespoli.me/*'});assert.throws(()=>check(x,true));
+});
+test('legacy deploy entrypoint refuses provider mutations in favor of central authorization',()=>{
+ const result=spawnSync(process.execPath,['scripts/deploy.mjs'],{encoding:'utf8',env:{PATH:process.env.PATH}});
+ assert.equal(result.status,1);assert.match(result.stderr,/Central deployment is required/);
 });

@@ -36,6 +36,7 @@ export async function handle(request,env,dependencies={}){
   const name=msg.params?.name,args=msg.params?.arguments||{};
   try{
    const t=validate(name,args);
+   if(dependencies.authorizeTool)await dependencies.authorizeTool(name,args);
    if(!t.annotations.readOnlyHint&&!identity.scopes.includes('github:collaborate'))throw Error('Collaboration scope required');
    const data=name==='audit_recent'?await recent(env,args.category):name==='audit_record'?await readRecord(env,args.id):await (dependencies.github||github)(env,identity,name,args,correlation);
    return respond(envelope(data));

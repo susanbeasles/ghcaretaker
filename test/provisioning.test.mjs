@@ -32,3 +32,33 @@ test('GitHub PKCS1 key normalization produces a usable PKCS8 key',async()=>{
  const {generateKeyPairSync}=await import('node:crypto');const {privateKey}=generateKeyPairSync('rsa',{modulusLength:2048,privateKeyEncoding:{type:'pkcs1',format:'pem'},publicKeyEncoding:{type:'spki',format:'pem'}});
  const normalized=normalizeKey(privateKey);assert.match(normalized,/BEGIN PRIVATE KEY/);assert.equal((await appJWT({GITHUB_APP_ID:'123',GITHUB_APP_PRIVATE_KEY:normalized})).split('.').length,3);
 });
+test('owner verification restores a reviewed installation only after a fresh pinned GitHub check',async()=>{
+ const s=storage(),a={...app(),pem:await pem()};await s.put('app',a);await s.put('phase','installation-review-required');await s.put('installation','789');
+ const response={id:789,app_id:123,account:a.owner,permissions:a.permissions};let calls=0;
+ const v=new VaultCore(s,env,async()=>{calls++;return Response.json([response]);});
+ await assert.rejects(v.appJWT());assert.equal((await v.install()).phase,'installed');assert.equal(calls,1);
+ await s.put('phase','installation-review-required');response.suspended_at=new Date().toISOString();await assert.rejects(v.install());assert.equal((await v.status()).phase,'installation-review-required');
+});
+test('a suspension arriving during owner verification prevents stale reactivation',async()=>{
+ const s=storage(),a={...app(),pem:await pem()};await s.put('app',a);await s.put('phase','installed');await s.put('installation','789');
+ const v=new VaultCore(s,env,async()=>{await s.put('phase','installation-review-required');await s.put('installation:revision',1);return Response.json([{id:789,app_id:123,account:a.owner,permissions:a.permissions}]);});
+ await assert.rejects(v.install(),/changed during verification/);assert.equal((await v.status()).phase,'installation-review-required');
+});
+test('oversized credential conversion stops the stream and remains locked without retaining a partial key',async()=>{
+ const s=storage();let cancelled=false;
+ const v=new VaultCore(s,env,async()=>new Response(new ReadableStream({pull(controller){controller.enqueue(new Uint8Array(262145));},cancel(){cancelled=true;}})));
+ const state=await v.begin('owner');await assert.rejects(v.convert('code',state,'owner'));assert.equal(cancelled,true);assert.equal((await v.status()).phase,'exchanging');assert.equal(await s.get('app'),undefined);
+});
+test('signed suspension racing the first GitHub installation lookup cannot commit stale authority',async()=>{
+ const secret='synthetic-webhook-fixture-only',s=storage(),a={...app(),pem:await pem(),webhook_secret:secret},e={...env,AUTH_ORIGIN:'https://control.example.test'};
+ await s.put('app',a);await s.put('phase','created');
+ const installation={id:789,app_id:a.id,account:a.owner,permissions:a.permissions};
+ const v=new VaultCore(s,e,async()=>{
+  const bytes=new TextEncoder().encode(JSON.stringify({action:'suspend',installation}));
+  const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(secret),{name:'HMAC',hash:'SHA-256'},false,['sign']);
+  const signature=Buffer.from(await crypto.subtle.sign('HMAC',key,bytes)).toString('hex');
+  const response=await v.webhook(new Request(e.AUTH_ORIGIN+'/webhooks/github/caretaker',{method:'POST',headers:{'content-type':'application/json','x-github-delivery':crypto.randomUUID(),'x-github-event':'installation','x-hub-signature-256':'sha256='+signature},body:bytes}));
+  assert.equal(response.status,202);return Response.json([installation]);
+ });
+ await assert.rejects(v.install(),/changed during verification/);assert.equal((await v.status()).phase,'installation-review-required');assert.equal(await s.get('installation'),undefined);
+});

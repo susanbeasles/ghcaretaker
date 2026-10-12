@@ -4,6 +4,7 @@ export class AppVault extends DurableObject{
  constructor(ctx,env){super(ctx,env);this.core=new VaultCore(ctx.storage,env);}
  fetch(){return new Response('Not found',{status:404});}
  status(){return this.core.status();}
+ webhook(request){return this.core.webhook(request);}
  begin(subject){return this.core.begin(subject);}
  convert(code,state,subject){return this.core.convert(code,state,subject);}
  install(){return this.core.install();}

@@ -56,13 +56,13 @@ import {github} from '../src/github.mjs';
 async function githubEnv(){
  const e=env();const pair=await crypto.subtle.generateKey({name:'RSASSA-PKCS1-v1_5',modulusLength:2048,publicExponent:new Uint8Array([1,0,1]),hash:'SHA-256'},true,['sign','verify']);
  const bytes=await crypto.subtle.exportKey('pkcs8',pair.privateKey);
- return {...e,GITHUB_OWNER:'personal',GITHUB_INSTALLATION_ID:'123',GITHUB_APP_ID:'456',GITHUB_APP_PRIVATE_KEY:'-----BEGIN PRIVATE KEY-----\n'+btoa(String.fromCharCode(...new Uint8Array(bytes)))+'\n-----END PRIVATE KEY-----'};
+ return {...e,GITHUB_OWNER:'personal',GITHUB_OWNER_ID:'42',GITHUB_INSTALLATION_ID:'123',GITHUB_APP_ID:'456',GITHUB_APP_PRIVATE_KEY:'-----BEGIN PRIVATE KEY-----\n'+btoa(String.fromCharCode(...new Uint8Array(bytes)))+'\n-----END PRIVATE KEY-----'};
 }
 test('upstream installation identity and exact token scopes pin credentials; GitHub URLs never followed',async()=>{
  const e=await githubEnv(),calls=[];
- const result=await github(e,{scopes:['github:read']},'read_file',{repo:'safe',path:'test.txt'},'corr',async(url,opts)=>{
+ const result=await github(e,{repos:['personal/*'],scopes:['github:read']},'read_file',{repo:'safe',path:'test.txt'},'corr',async(url,opts)=>{
   calls.push({url,opts});assert.ok(url.startsWith('https://api.github.com/'));assert.equal(opts.redirect,'error');
-  if(url.endsWith('/app/installations/123'))return Response.json({account:{login:'personal',type:'User'}});
+  if(url.endsWith('/app/installations/123'))return Response.json({id:123,app_id:456,account:{id:42,login:'personal',type:'User'}});
   if(url.endsWith('/access_tokens')){assert.deepEqual(JSON.parse(opts.body).permissions,{...permissions,issues:'read',pull_requests:'read'});return Response.json({token:'neverlogme',expires_at:new Date(Date.now()+3600000).toISOString(),permissions:JSON.parse(opts.body).permissions});}
   return Response.json({type:'file',encoding:'base64',size:5,content:btoa('hello'),download_url:'https://evil',path:'test.txt'});
  });
@@ -70,18 +70,18 @@ test('upstream installation identity and exact token scopes pin credentials; Git
 });
 test('wrong-account installation stops before minting; unexpected broader permissions revoke token',async()=>{
  const e=await githubEnv();let calls=0;
- await assert.rejects(github(e,{scopes:['github:read']},'get_repository',{repo:'safe'},'corr',async()=>{calls++;return Response.json({account:{login:'work',type:'Organization'}});}));assert.equal(calls,1);
+ await assert.rejects(github(e,{repos:['personal/*'],scopes:['github:read']},'get_repository',{repo:'safe'},'corr',async()=>{calls++;return Response.json({account:{login:'work',type:'Organization'}});}));assert.equal(calls,1);
  const seen=[];
- await assert.rejects(github(e,{scopes:['github:read']},'get_repository',{repo:'safe'},'corr',async(url,opts)=>{
-  seen.push(url);if(url.endsWith('/app/installations/123'))return Response.json({account:{login:'personal',type:'User'}});
+ await assert.rejects(github(e,{repos:['personal/*'],scopes:['github:read']},'get_repository',{repo:'safe'},'corr',async(url,opts)=>{
+  seen.push(url);if(url.endsWith('/app/installations/123'))return Response.json({id:123,app_id:456,account:{id:42,login:'personal',type:'User'}});
   if(url.endsWith('/access_tokens'))return Response.json({token:'secret',expires_at:new Date(Date.now()+3600000).toISOString(),permissions});
   assert.equal(url,'https://api.github.com/installation/token');assert.equal(opts.method,'DELETE');return new Response(null,{status:204});
  }));assert.equal(seen.length,3);
 });
 test('write network failures are uncertain and never retried',async()=>{
  const e=await githubEnv();let writes=0;
- await assert.rejects(github(e,{scopes:['github:read','github:collaborate']},'comment',{repo:'safe',number:1,body:'feedback'},'corr',async(url)=>{
-  if(url.endsWith('/app/installations/123'))return Response.json({account:{login:'personal',type:'User'}});
+ await assert.rejects(github(e,{repos:['personal/*'],scopes:['github:read','github:collaborate']},'comment',{repo:'safe',number:1,body:'feedback'},'corr',async(url)=>{
+  if(url.endsWith('/app/installations/123'))return Response.json({id:123,app_id:456,account:{id:42,login:'personal',type:'User'}});
   if(url.endsWith('/access_tokens'))return Response.json({token:'secret',expires_at:new Date(Date.now()+3600000).toISOString(),permissions});
   writes++;throw Error('timeout');
  }));assert.equal(writes,1);assert.ok(e.events.some(x=>x.phase==='uncertain'));
