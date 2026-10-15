@@ -8,7 +8,7 @@ export async function readSecret(binding) {
   return value;
 }
 
-// Absent binding or absent secret both mean "not configured" (used for GITHUB_WEBHOOK_SECRET_PREVIOUS outside rotation).
+// Absent binding or absent secret both mean "not configured" (used for OBSERVATORY_WEBHOOK_SECRET_PREVIOUS outside rotation).
 export async function readOptionalSecret(binding) {
   if (!binding) return null;
   try { return await readSecret(binding); } catch { return null; }

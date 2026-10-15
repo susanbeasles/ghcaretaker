@@ -1,49 +1,73 @@
 // Read-only GitHub access for the commit ledger through the caretaker App installation.
-// Key: CARETAKER_APP_KEY (Secrets Store, PKCS8 or PKCS1 PEM). JWT signing reuses appJWT from crypto.mjs.
-// Installation tokens are minted per repository with contents:read only, held in memory, never stored or logged.
+// Key: OBSERVATORY_APP_KEY (Secrets Store, PKCS8 or PKCS1 PEM). JWT signing reuses appJWT from crypto.mjs.
+// Installation tokens are minted per repository with one read permission (contents:read for the commit ledger,
+// actions:read for the metrics collector), held in memory, never stored or logged.
 import { appJWT } from './crypto.mjs';
 import { normalizeKey } from './vault-core.mjs';
-import { CodedError, readJson, sha256Hex } from './bytes.mjs';
+import { CodedError, RedirectRefused, fetchNoRedirect, readJson, sha256Hex } from './bytes.mjs';
 import { readSecret } from './secrets.mjs';
 
 const API = 'https://api.github.com';
-const ALLOWED_PERMISSIONS = { contents: 'read', metadata: 'read' };
 export const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 export class GitHubError extends CodedError {}
 
+// The observatory App: a separate, read-only GitHub App (not the MCP App pinned in policy.mjs / AppVault).
+// `administration: read` exists only so the App can subscribe to repository_ruleset and branch_protection_rule.
+export const OBSERVATORY_APP_PERMISSIONS = Object.freeze({
+  contents: 'read', pull_requests: 'read', actions: 'read', checks: 'read', statuses: 'read', deployments: 'read',
+  packages: 'read', administration: 'read', metadata: 'read',
+});
+export const OBSERVATORY_APP_EVENTS = Object.freeze(['push', 'create', 'delete', 'release', 'pull_request', 'pull_request_review',
+  'workflow_run', 'workflow_job', 'check_suite', 'status', 'deployment', 'deployment_status', 'repository', 'repository_ruleset',
+  'branch_protection_rule', 'package']);
+/** GitHub App manifest for the observatory App (data only; the owner registers it). */
+export const observatoryAppManifest = () => ({
+  name: 'ghcaretaker-observatory', url: 'https://github.com/susanbeasles/ghcaretaker', public: false,
+  description: 'Read-only observer: captures webhooks into hash-chained ledgers and workflow metrics. Never writes.',
+  hook_attributes: { url: 'https://hooks.vespoli.me/github', active: true },
+  default_permissions: { ...OBSERVATORY_APP_PERMISSIONS }, default_events: [...OBSERVATORY_APP_EVENTS],
+});
+
 export async function githubRequest(path, { token, method = 'GET', body, fetcher = fetch, limit = 4 * 1024 * 1024 }) {
   let response;
   try {
-    response = await fetcher(API + path, {
-      method, redirect: 'error', signal: AbortSignal.timeout(15_000),
+    response = await fetchNoRedirect(fetcher, API + path, {
+      method, signal: AbortSignal.timeout(15_000),
       headers: {
         Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2026-03-10',
         'User-Agent': 'ghcaretaker-observatory', ...(body ? { 'Content-Type': 'application/json' } : {}),
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
-  } catch { throw new GitHubError('github_network'); }
+  } catch (e) { throw e instanceof RedirectRefused ? new GitHubError('github_redirect_refused', e.status) : new GitHubError('github_network'); }
   if (response.status === 204) return { status: 204, data: null };
   if (!response.ok) { await response.body?.cancel().catch(() => {}); throw new GitHubError('github_http_' + response.status, response.status); }
   try { return { status: response.status, data: await readJson(response, limit) }; } catch { throw new GitHubError('github_bad_body'); }
 }
 
-export async function mintInstallationToken(env, installationId, repoId, fetcher = fetch) {
-  const appId = String(env.CARETAKER_APP_ID ?? '');
+export const mintInstallationToken = (env, installationId, repoId, fetcher = fetch) => mintScopedToken(env, installationId, repoId, { contents: 'read' }, fetcher);
+
+// Workflow metrics collector (src/metrics.mjs): run timing and job logs need `actions: read` and nothing else.
+export const mintActionsToken = (env, installationId, repoId, fetcher = fetch) => mintScopedToken(env, installationId, repoId, { actions: 'read' }, fetcher);
+
+async function mintScopedToken(env, installationId, repoId, permissions, fetcher) {
+  if (Object.entries(permissions).some(([k, v]) => v !== 'read' || OBSERVATORY_APP_PERMISSIONS[k] !== 'read')) throw new GitHubError('permission_not_allowed');
+  const allowed = { ...permissions, metadata: 'read' };
+  const appId = String(env.OBSERVATORY_APP_ID ?? '');
   if (!/^(?:\d{1,12}|Iv[0-9A-Za-z.]{8,40})$/.test(appId)) throw new GitHubError('app_unconfigured');
   if (!Number.isSafeInteger(installationId) || installationId < 1 || !Number.isSafeInteger(repoId) || repoId < 1) throw new GitHubError('bad_installation');
   let jwt;
-  try { jwt = await appJWT({ GITHUB_APP_ID: appId, GITHUB_APP_PRIVATE_KEY: normalizeKey(await readSecret(env.CARETAKER_APP_KEY)) }); }
+  try { jwt = await appJWT({ GITHUB_APP_ID: appId, GITHUB_APP_PRIVATE_KEY: normalizeKey(await readSecret(env.OBSERVATORY_APP_KEY)) }); }
   catch { throw new GitHubError('app_key_unavailable'); }
   const { data } = await githubRequest('/app/installations/' + installationId + '/access_tokens', {
-    token: jwt, method: 'POST', body: { repository_ids: [repoId], permissions: { contents: 'read' } }, fetcher, limit: 256 * 1024,
+    token: jwt, method: 'POST', body: { repository_ids: [repoId], permissions }, fetcher, limit: 256 * 1024,
   });
   const expires = Date.parse(data?.expires_at);
   if (typeof data?.token !== 'string' || !Number.isFinite(expires)) throw new GitHubError('bad_token_response');
-  // Refuse (and revoke) a token broader than read-only contents/metadata.
+  // Refuse (and revoke) a token broader than the requested read permission plus metadata:read.
   const granted = data.permissions || {};
-  if (Object.entries(granted).some(([k, v]) => ALLOWED_PERMISSIONS[k] !== v)) {
+  if (Object.entries(granted).some(([k, v]) => allowed[k] !== v)) {
     await githubRequest('/installation/token', { token: data.token, method: 'DELETE', fetcher }).catch(() => {});
     throw new GitHubError('token_too_broad');
   }
@@ -86,7 +110,7 @@ export async function hasPromotionTag(fullName, sha, token, fetcher = fetch) {
   return false;
 }
 
-function repoPath(fullName) {
+export function repoPath(fullName) {
   const m = /^([A-Za-z0-9-]{1,39})\/([A-Za-z0-9._-]{1,100})$/.exec(fullName ?? '');
   if (!m || m[2] === '.' || m[2] === '..') throw new GitHubError('bad_repo_name');
   return m[1] + '/' + m[2];

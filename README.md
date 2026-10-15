@@ -40,5 +40,7 @@ acceptance checks.
 The same Worker also serves `POST https://hooks.vespoli.me/github`: every GitHub App webhook is verified
 (HMAC-SHA256), captured raw to R2 `github-events`, appended to a hash-chained event ledger and, for `push`,
 to a per-repository commit ledger that raises integrity findings. It does not deploy, promote or decide
-anything. See [docs/OBSERVATORY.md](docs/OBSERVATORY.md) for formats, verification, secret rotation and the
-activation steps that remain; nothing in it is live until those steps and their acceptance checks pass.
+anything. Workflow events also feed a D1 metrics collector, shown with the ledgers on an owner-only, read-only
+dashboard at `https://caretaker.vespoli.me/` (Cloudflare Access plus the Worker's own JWT check). See
+[docs/OBSERVATORY.md](docs/OBSERVATORY.md) for formats, verification, secret rotation and the activation steps that
+remain; nothing in it is live until those steps and their acceptance checks pass.

@@ -14,6 +14,9 @@ export const recentEvents = (env, limit = 50, cursor = null) => eventLedger(env)
 /** {seq, entry_hash, last_checkpoint, outbox} of the event ledger. */
 export const ledgerHead = env => eventLedger(env).head();
 
+/** Repositories the event ledger has seen: [{repo_id, full_name, last_seen}] (full_name is payload text: untrusted). */
+export const knownRepos = env => eventLedger(env).repos();
+
 /** Recompute the event ledger chain over [fromSeq, toSeq] (at most 5000 entries per call). */
 export const verifyLedger = (env, fromSeq, toSeq) => eventLedger(env).verify(fromSeq, toSeq);
 

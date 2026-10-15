@@ -86,3 +86,62 @@ export async function pkcs8Pem() {
 }
 
 export const sha = n => createHash('sha1').update('commit-' + n).digest('hex');
+
+// D1 stand-in over node:sqlite (D1 is SQLite): prepare/bind/first/all/run and an all-or-nothing batch.
+export function d1Database(schemaSql) {
+  const db = new DatabaseSync(':memory:');
+  if (schemaSql) db.exec(schemaSql);
+  const statement = (query, args = []) => ({
+    query, args,
+    bind: (...values) => {
+      if (values.some(v => v === undefined)) throw new TypeError('D1_TYPE_ERROR: undefined is not a supported bind value');
+      return statement(query, values);
+    },
+    async first(column) { const row = db.prepare(query).get(...args); if (!row) return null; return column ? row[column] : { ...row }; },
+    async all() { return { success: true, results: db.prepare(query).all(...args).map(r => ({ ...r })), meta: {} }; },
+    async run() { const r = db.prepare(query).run(...args); return { success: true, meta: { changes: Number(r.changes) } }; },
+  });
+  const fake = {
+    db, failNextBatch: false, batches: 0,
+    prepare: query => statement(query),
+    async batch(statements) {
+      if (fake.failNextBatch) { fake.failNextBatch = false; throw new Error('d1 unavailable'); }
+      fake.batches++;
+      db.exec('BEGIN');
+      try {
+        const out = statements.map(s => { const r = db.prepare(s.query).run(...s.args); return { success: true, meta: { changes: Number(r.changes) } }; });
+        db.exec('COMMIT');
+        return out;
+      } catch (e) { db.exec('ROLLBACK'); throw e; }
+    },
+  };
+  return fake;
+}
+
+// Cloudflare Access stand-in: an RS256 key pair generated per test run, its JWKS at the team certs URL, and a signer.
+export const ACCESS_TEAM = 'https://vespoli.cloudflareaccess.com';
+export const ACCESS_AUD_TEST = 'a'.repeat(32) + 'b'.repeat(32);
+export const OWNER_EMAIL_TEST = 'owner@vespoli.test';
+export async function accessKit({ kid = 'kid-' + crypto.randomUUID() } = {}) {
+  const pair = await crypto.subtle.generateKey({ name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign', 'verify']);
+  const jwk = await crypto.subtle.exportKey('jwk', pair.publicKey);
+  const keys = [{ kid, kty: 'RSA', alg: 'RS256', use: 'sig', n: jwk.n, e: jwk.e }];
+  const b64u = bytes => Buffer.from(bytes).toString('base64url');
+  const kit = {
+    kid, keys, certFetches: 0,
+    env: { ACCESS_TEAM_DOMAIN: ACCESS_TEAM, ACCESS_AUD: ACCESS_AUD_TEST, OWNER_EMAIL: OWNER_EMAIL_TEST },
+    claims: (over = {}) => { const t = Math.floor(Date.now() / 1000); return { aud: [ACCESS_AUD_TEST], email: OWNER_EMAIL_TEST, exp: t + 600, iat: t - 10, nbf: t - 10, iss: ACCESS_TEAM, sub: 'owner-sub', type: 'app', ...over }; },
+    async sign(claims = kit.claims(), header = {}, key = pair.privateKey) {
+      const input = b64u(Buffer.from(JSON.stringify({ alg: 'RS256', kid, typ: 'JWT', ...header }))) + '.' + b64u(Buffer.from(JSON.stringify(claims)));
+      const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, new TextEncoder().encode(input));
+      return input + '.' + b64u(new Uint8Array(sig));
+    },
+    fetcher: async (url, init) => {
+      if (url !== ACCESS_TEAM + '/cdn-cgi/access/certs') return new Response(null, { status: 599 });
+      if (init?.redirect !== 'manual') throw new Error('certs must be fetched with redirect: manual (and 3xx refused)');
+      kit.certFetches++;
+      return Response.json({ keys: kit.keys, public_cert: {}, public_certs: [] });
+    },
+  };
+  return kit;
+}

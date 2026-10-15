@@ -63,7 +63,7 @@ test('forced update and deletion of main are findings and alerts carry no secret
   await core.alarm();
   assert.deepEqual(kinds(core), ['main_deleted', 'main_forced_update']);
   const forced = alerts.find(a => a.body.code === 'main_forced_update');
-  assert.equal(forced.url, 'https://alerts.invalid/caretaker'); assert.equal(forced.init.redirect, 'error'); assert.ok(forced.init.signal);
+  assert.equal(forced.url, 'https://alerts.invalid/caretaker'); assert.equal(forced.init.redirect, 'manual'); assert.ok(forced.init.signal);
   assert.deepEqual({ ...forced.body, finding_id: 0, detected_at: 0, delivery_id: 0 }, { schema: 'ghcaretaker-alert/v1', type: 'integrity_finding', code: 'main_forced_update',
     repo_id: REPO, repo: 'susanbeasles/demo', ref: 'refs/heads/main', sha: sha(2), delivery_id: 0, entry_seq: 1, finding_id: 0, detail: { before: sha(5), after: sha(2) }, detected_at: 0 });
   for (const a of alerts) assert.ok(!JSON.stringify(a.body).includes('token-for-tests'));

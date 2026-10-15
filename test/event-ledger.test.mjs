@@ -88,7 +88,7 @@ test('backup capture receives {repo_id, reason, delivery_id}; failures retry wit
   assert.equal(row.done_at, null); assert.equal(row.attempts, ESCALATE_AT); assert.equal(row.last_error, 'Error');
   await core.alarm();
   const escalation = alerts.find(a => a.body.code === 'downstream_retrying');
-  assert.ok(escalation, 'operational alert sent'); assert.equal(escalation.redirect, 'error'); assert.equal(escalation.body.target, 'backup');
+  assert.ok(escalation, 'operational alert sent'); assert.equal(escalation.redirect, 'manual'); assert.equal(escalation.body.target, 'backup');
   failing = false; now.advance(3_600_000); await core.alarm();
   assert.ok(storage.sql.exec("SELECT done_at FROM outbox WHERE kind = 'backup'").toArray()[0].done_at, 'eventually delivered');
   assert.equal(r.state, 'appended');
@@ -96,7 +96,7 @@ test('backup capture receives {repo_id, reason, delivery_id}; failures retry wit
 
 test('workflow events reach the metrics sink with a reference that readDelivery verifies', async () => {
   const observed = [], current = randomSecret();
-  const { core, env, EVENTS } = ledger({ metricsSink: { record: async o => { observed.push(o); } } }, { GITHUB_WEBHOOK_SECRET: secret(current) });
+  const { core, env, EVENTS } = ledger({ metricsSink: { record: async o => { observed.push(o); } } }, { OBSERVATORY_WEBHOOK_SECRET: secret(current) });
   const payload = { action: 'completed', workflow_job: { id: 1, name: 'test' }, repository: { id: 42, full_name: 'susanbeasles/demo', owner: { id: OWNER } } };
   const text = JSON.stringify(payload), id = crypto.randomUUID();
   const response = await handleWebhook(new Request('https://hooks.vespoli.me/github', { method: 'POST', body: text, headers: { 'x-github-event': 'workflow_job', 'x-github-delivery': id, 'x-hub-signature-256': await sign(current, text) } }), env);
@@ -120,7 +120,7 @@ test('push and create are handed to the per-repository commit ledger; read API p
     now, commitDetails: async (_r, s) => ({ sha: s, tree: sha(900), parents: [sha(1)], author_name: 'a', author_date: 'd', committer_name: 'c', committer_date: 'd', message_sha256: 'm'.repeat(1).padEnd(64, '0'), verified: false, verification_reason: 'unsigned' }),
     mintToken: async () => ({ token: 'test-token', expires_at: Date.now() + 3_600_000 }), fetcher: async () => new Response(null, { status: 204 }),
   }));
-  const { core, env, now } = ledger({}, { GITHUB_WEBHOOK_SECRET: secret(current), BACKUP: { capture: async () => {} } });
+  const { core, env, now } = ledger({}, { OBSERVATORY_WEBHOOK_SECRET: secret(current), BACKUP: { capture: async () => {} } });
   env.COMMIT_LEDGER = commitNs;
   const payload = { ref: 'refs/heads/main', before: sha(1), after: sha(2), created: false, deleted: false, forced: false, pusher: { name: 'x' }, commits: [{ id: sha(2) }], repository: { id: 42, full_name: 'susanbeasles/demo', owner: { id: OWNER } }, installation: { id: 7 } };
   const text = JSON.stringify(payload);

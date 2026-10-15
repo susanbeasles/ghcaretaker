@@ -8,6 +8,8 @@
 // - Read the raw payload with `readDelivery(env, observation.object_key, observation.body_sha256)` from
 //   src/observatory-read.mjs; it verifies the digest. Never log or persist the raw body outside the collector's tables.
 //
+import { metricsCollector } from './metrics.mjs';
+
 /**
  * @typedef {object} WorkflowObservation
  * @property {string} delivery_id  X-GitHub-Delivery (UUID)
@@ -25,5 +27,8 @@
 /** @type {MetricsSink} */
 export const noopMetricsSink = Object.freeze({ async record() {} });
 
-/** @returns {MetricsSink} Replace the body of this function to wire the D1 collector. */
-export function metricsSinkFor(_env) { return noopMetricsSink; }
+/**
+ * @returns {MetricsSink} The D1 collector (src/metrics.mjs). Without the METRICS_DB binding `record` throws
+ * `metrics_db_unbound`, so observations stay in the outbox (retried, escalated) instead of being dropped.
+ */
+export function metricsSinkFor(env) { return metricsCollector(env); }

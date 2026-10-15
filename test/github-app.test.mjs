@@ -6,7 +6,7 @@ import { secret, pkcs8Pem, sha } from './fakes.mjs';
 
 async function appEnv() {
   const { pem, publicKey } = await pkcs8Pem();
-  return { env: { CARETAKER_APP_ID: '123456', CARETAKER_APP_KEY: secret(pem) }, publicKey };
+  return { env: { OBSERVATORY_APP_ID: '123456', OBSERVATORY_APP_KEY: secret(pem) }, publicKey };
 }
 
 test('installation token: RS256 App JWT, single repository, contents:read only, redirects refused', async () => {
@@ -19,7 +19,7 @@ test('installation token: RS256 App JWT, single repository, contents:read only, 
   assert.equal(calls.length, 1);
   const { url, init } = calls[0];
   assert.equal(url, 'https://api.github.com/app/installations/7/access_tokens');
-  assert.equal(init.method, 'POST'); assert.equal(init.redirect, 'error'); assert.ok(init.signal);
+  assert.equal(init.method, 'POST'); assert.equal(init.redirect, 'manual'); assert.ok(init.signal);
   assert.deepEqual(JSON.parse(init.body), { repository_ids: [42], permissions: { contents: 'read' } });
   const jwt = init.headers.Authorization.replace('Bearer ', ''), [h, p, s] = jwt.split('.');
   assert.deepEqual(JSON.parse(new TextDecoder().decode(unb64(h))), { alg: 'RS256', typ: 'JWT' });
@@ -38,8 +38,8 @@ test('a broader-than-requested token is revoked and refused; missing App id or k
   assert.deepEqual(seen.at(-1), ['DELETE', 'https://api.github.com/installation/token']);
   let called = false;
   const never = async () => { called = true; return new Response(null, { status: 500 }); };
-  await assert.rejects(mintInstallationToken({ ...env, CARETAKER_APP_ID: '' }, 7, 42, never), /app_unconfigured/);
-  await assert.rejects(mintInstallationToken({ ...env, CARETAKER_APP_KEY: 'not-a-binding' }, 7, 42, never), /app_key_unavailable/);
+  await assert.rejects(mintInstallationToken({ ...env, OBSERVATORY_APP_ID: '' }, 7, 42, never), /app_unconfigured/);
+  await assert.rejects(mintInstallationToken({ ...env, OBSERVATORY_APP_KEY: 'not-a-binding' }, 7, 42, never), /app_key_unavailable/);
   await assert.rejects(mintInstallationToken(env, 0, 42, never), /bad_installation/);
   assert.equal(called, false);
 });
@@ -47,7 +47,7 @@ test('a broader-than-requested token is revoked and refused; missing App id or k
 test('commit details: bounded files list, message reduced to sha256, verification copied, 404 recorded fail-closed', async () => {
   const s = sha(2), urls = [];
   const fetcher = async (url, init) => {
-    urls.push(url); assert.equal(init.redirect, 'error');
+    urls.push(url); assert.equal(init.redirect, 'manual');
     if (url.includes(sha(3))) return new Response('{"message":"Not Found"}', { status: 404 });
     return Response.json({ sha: s, parents: [{ sha: sha(1) }], commit: { tree: { sha: sha(100) }, message: 'feat: hello',
       author: { name: 'A', email: 'a@users.noreply.github.com', date: '2026-10-15T10:00:00Z' }, committer: { name: 'GitHub', date: '2026-10-15T10:01:00Z' },

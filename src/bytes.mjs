@@ -58,4 +58,13 @@ export async function readBounded(stream, limit) {
 // Bounded, fatal-UTF-8 JSON body of an upstream response.
 export async function readJson(response, limit) { return JSON.parse(decodeUtf8(await readBounded(response.body, limit))); }
 
+// The Workers runtime rejects `redirect: 'error'` ("Invalid redirect value, must be one of follow or manual"), so
+// "never follow a redirect" is `redirect: 'manual'` plus this check: any 3xx is a failure and its body is discarded.
+export class RedirectRefused extends CodedError { constructor(status) { super('redirect_refused', status); } }
+export async function fetchNoRedirect(fetcher, url, init = {}) {
+  const response = await fetcher(url, { ...init, redirect: 'manual' });
+  if (response.status >= 300 && response.status < 400) { await response.body?.cancel().catch(() => {}); throw new RedirectRefused(response.status); }
+  return response;
+}
+
 export const isPlainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);

@@ -1,7 +1,9 @@
 # GitHub event observatory
 
-Implements infra-root ADR-0001 section 2 (event capture, event ledger, commit ledgers, downstream) and the seam for
-section 3 (workflow metrics). Design decisions: [docs/adr/0001-observatory-ingest.md](adr/0001-observatory-ingest.md).
+Implements infra-root ADR-0001 section 2 (event capture, event ledger, commit ledgers, downstream) and section 3
+(workflow metrics collector and the caretaker dashboard). Design decisions:
+[docs/adr/0001-observatory-ingest.md](adr/0001-observatory-ingest.md) and
+[docs/adr/0002-metrics-and-dashboard.md](adr/0002-metrics-and-dashboard.md).
 
 ## Status: not activated
 
@@ -16,21 +18,41 @@ Activation checklist (owner or the appropriate runner; none of it needs a human 
    `infra` together with the existing `mcp.vespoli.me` routes (spec section 10: routes belong to `infra`).
 2. **infra-root**: R2 bucket `github-events` with its indefinite bucket lock. Note: a lock blocks deletes and
    overwrites, which this Worker never attempts; it does not block the create-only writes it does make.
-3. **seed / root runner**: Secrets Store (store `b6504fe2d5f64352954629bc7185fb79`) values `GITHUB_WEBHOOK_SECRET`,
-   `CARETAKER_APP_KEY` (PEM, PKCS8 or PKCS1) and `ALERT_WEBHOOK_URL` (https). `GITHUB_WEBHOOK_SECRET_PREVIOUS` is
+3. **seed / root runner**: Secrets Store (store `b6504fe2d5f64352954629bc7185fb79`) values `OBSERVATORY_WEBHOOK_SECRET`,
+   `OBSERVATORY_APP_KEY` (PEM, PKCS8 or PKCS1) and `ALERT_WEBHOOK_URL` (https). `OBSERVATORY_WEBHOOK_SECRET_PREVIOUS` is
    bound but only populated during rotation (see below). VERIFY whether `wrangler deploy` refuses a Secrets Store
    binding whose secret does not exist yet; if it does, create it with a random value the runner discards.
 4. **backup**: the `backup` Worker with its `BackupIngest` entrypoint must be deployed first; a service binding to a
    missing service is expected to fail the deploy (VERIFY).
-5. **caretaker App** (see "App and permissions" below): decide which App delivers, set its webhook URL to
-   `https://hooks.vespoli.me/github`, set the webhook secret through the API, subscribe it to the events listed
-   below, and set the non-secret var `CARETAKER_APP_ID` in `wrangler.jsonc` (numeric App id or `Iv…` client id).
-   Until it is set, commit lookups fail closed with `app_unconfigured` and the commit ledger inbox waits.
+5. **observatory App** (see "The observatory App" below): register the separate read-only App from
+   `observatoryAppManifest()` in `src/github-app.mjs` (permissions and events exactly as listed below, including
+   `actions: read`, which run timing and job logs need), webhook URL `https://hooks.vespoli.me/github`, set the webhook
+   secret through the API, install it on the personal account, and set the non-secret var `OBSERVATORY_APP_ID` in
+   `wrangler.jsonc` (numeric App id or `Iv…` client id). Until it is set, commit lookups fail closed with
+   `app_unconfigured` and the commit ledger inbox waits; metrics rows are stored without billing or telemetry.
 6. Deploy (`npm run deploy` in the Cloudflare build environment) applies Durable Object migration `v2`
    (`EventLedger`, `CommitLedger`, SQLite).
 7. Acceptance: a GitHub `ping` and a `push` redelivered from the App's delivery log are answered 202, appear in R2 and
    in `verifyLedger` output; a delivery with a wrong signature is 401; the backup Worker records the capture; a test
    force-push to `main` of a scratch repository raises `main_forced_update` at `ALERT_WEBHOOK_URL`.
+
+Metrics and dashboard (section 3):
+
+8. **infra**: create D1 `ghcaretaker-observatory`; put its `database_id` on the `METRICS_DB` entry of `wrangler.jsonc`
+   (the entry has none yet; `check-config --production` prints a "pending activation" line until it does). VERIFY
+   what `wrangler deploy` does with a D1 binding that has no id (current Wrangler may auto-provision a database by
+   name; the owner wants infra to own it, so set the id first). `npm run deploy` applies `migrations-observatory/`.
+9. **infra**: DNS and route for `caretaker.vespoli.me` and a Cloudflare Access self-hosted application on the whole
+   hostname: identity provider login, MFA required, a single allow policy for the owner's identity, no bypass or
+   service-token policy. Copy its AUD tag into the var `ACCESS_AUD` and the owner's Access email into `OWNER_EMAIL`
+   (neither is a secret). While either is empty the Worker answers 403 to every dashboard request.
+10. **backup**: the `BackupStatus` entrypoint with `summary()` (the dashboard tolerates it being absent or failing).
+11. **observatory App**: confirm `actions: read` is granted on the installation (job logs and run timing need it).
+12. Acceptance: an unauthenticated browser is stopped by Access (its login page, served by Cloudflare, not the
+    Worker); after owner login with MFA the overview renders. The Worker's own gate is checked by the tests in
+    `test/access.test.mjs` and must also hold live: an assertion from another Access application (other AUD) or for
+    another email is 403 with an empty body, and no path on the host answers 3xx from the Worker.
+    A job using `actions/runner-telemetry` shows CPU and memory on `/actions` after it completes.
 
 ## What is captured, and where
 
@@ -63,7 +85,7 @@ Custom metadata: `sha256` (hex sha256 of the stored object bytes; also sent as t
 | Body over 25 MiB (counted while reading; a declared `Content-Length` over the bound is refused before reading) | 401, empty | nothing |
 | `X-Hub-Signature-256` not `sha256=<64 lowercase hex>` or no configured secret matches (HMAC-SHA256 over the raw bytes, constant-time) | 401, empty | nothing |
 | Signed body not UTF-8 JSON object | 401, empty | nothing |
-| `GITHUB_WEBHOOK_SECRET` unavailable | 500, empty | nothing |
+| `OBSERVATORY_WEBHOOK_SECRET` unavailable | 500, empty | nothing |
 | Delivery id already ledgered with the same body | 202, empty | nothing new |
 | Same delivery id in flight, or already ledgered with a different body | 409, empty | nothing new |
 | R2 or ledger failure | 500, empty | possibly the R2 object; never a ledger entry without its object |
@@ -130,7 +152,7 @@ Raised by the commit ledger (`src/integrity.mjs`); each is stored once and sent 
 Alert body (`schema: ghcaretaker-alert/v1`): `{type: "integrity_finding", code, repo_id, repo, ref, sha, delivery_id,
 entry_seq, finding_id, detail, detected_at}`. Operational alerts use `type: "operational"` with `code`
 `downstream_retrying`, `commit_ledger_stalled`, `promotion_check_failing`, `mirror_conflict` or
-`checkpoint_conflict`. Alerts never contain tokens, bodies or commit messages. Delivery uses `redirect: "error"` and
+`checkpoint_conflict`. Alerts never contain tokens, bodies or commit messages. Delivery never follows a redirect (`redirect: "manual"`, any 3xx is a failure) and uses
 a 10 s timeout; any non-2xx is retried with backoff (30 s doubling to 1 h) forever, and each failure is logged as a
 `critical` structured line.
 
@@ -140,69 +162,131 @@ a 10 s timeout; any non-2xx is retried with backoff (30 s doubling to 1 h) forev
   (`reason` is the event name) in the event ledger outbox, delivered at least once by the alarm. The backup Worker
   must be idempotent on `delivery_id`. "Green means accepted": a 202 here says nothing about the backup.
 - **Commit ledger**: `push` and `create` are handed to the repository's `CommitLedger.ingest` the same way.
-- **Metrics seam** (for the section 3 collector): `workflow_run` and `workflow_job` events of owned repositories queue
-  a `metrics` row; the alarm calls `metricsSinkFor(env).record(observation)` (`src/metrics-sink.mjs`). The default is
-  a no-op that acknowledges. The collector replaces `metricsSinkFor` and reads payloads with
-  `readDelivery(env, object_key, body_sha256)` (digest-checked). Observation:
-  `{delivery_id, event, action, repo_id, received_at, object_key, body_sha256}`. Contract: idempotent per
-  `delivery_id`; throw to be retried.
-- **Read API** (internal functions, no routes yet; `src/observatory-read.mjs`): `recentEvents(env, limit, cursor)`,
-  `ledgerHead(env)`, `commitLedger(env, repoId, limit, cursor)`, `findings(env, repoId?)`, `verifyLedger`,
-  `verifyCommitLedger`, `readDelivery`. Cursors are the `next_cursor` of the previous page; limits are 1 to 100.
+- **Metrics**: `workflow_run` and `workflow_job` events of owned repositories queue a `metrics` row; the alarm calls
+  `metricsSinkFor(env).record(observation)` (`src/metrics-sink.mjs`), which is the D1 collector in `src/metrics.mjs`
+  (see "Workflow metrics" below). Without the `METRICS_DB` binding it throws `metrics_db_unbound`, so rows wait in
+  the outbox instead of being dropped. Observation: `{delivery_id, event, action, repo_id, received_at, object_key,
+  body_sha256}`. Contract: idempotent per `delivery_id`; throw to be retried.
+- **Read API** (`src/observatory-read.mjs`, used by the dashboard): `recentEvents(env, limit, cursor)`,
+  `ledgerHead(env)`, `knownRepos(env)`, `commitLedger(env, repoId, limit, cursor)`, `findings(env, repoId?)`,
+  `verifyLedger`, `verifyCommitLedger`, `readDelivery`. Cursors are the `next_cursor` of the previous page; limits are
+  1 to 100.
+
+## Workflow metrics (D1 `ghcaretaker-observatory`, binding `METRICS_DB`)
+
+Schema: `migrations-observatory/0001_metrics.sql` (separate from the audit migrations in `migrations/`).
+
+| Table | Key | Content |
+|---|---|---|
+| `runs` | `(repo_id, run_id, attempt)` | workflow id, name, path, event, branch, head sha, actor id, status, conclusion, `created_at`, `run_started_at`, `updated_at`; `billable_ms`, `billable_json`, `billable_kind` |
+| `jobs` | `job_id` | run id, attempt, repo id, name, workflow name, status, runner name, labels (JSON), runner group, `queued_at` (= job `created_at`), `started_at`, `completed_at`, conclusion; `telemetry`, `telemetry_kind` |
+| `steps` | `(job_id, number)` | name, status, conclusion, `started_at`, `completed_at` (from the job payload) |
+| `deliveries_seen` | `delivery_id` | idempotency: a delivery recorded here is never processed again |
+
+- **Owner only**: the payload's `repository.owner.id` must equal `GITHUB_OWNER_ID` (215839550) and `repository.id`
+  must equal the observation's; anything else is acknowledged and ignored.
+- **Convergence**: upserts guarded by status rank (`completed` > `in_progress` > anything else). A higher rank always
+  wins; an equal rank wins only if it is not older (`updated_at` for runs, the latest job/step timestamp otherwise);
+  a terminal row never moves back. Nullable descriptive fields are only ever filled in, never blanked.
+- **Order of writes**: the run/job/steps upsert lands first; enrichment (billing, telemetry) and the `deliveries_seen`
+  row land together in one D1 batch. A failure in between is retried and converges.
+- **Billing (reported)**: on a completed run, `GET /repos/{r}/actions/runs/{id}/timing` (token: `actions: read`, one
+  repository). `billable_ms` is the sum of `billable.<OS>.total_ms`; `billable_json` keeps the API's own structure and
+  units (`total_ms`, `jobs`, `job_runs[{job_id, duration_ms}]`, `run_duration_ms`), validated field by field;
+  `billable_kind = 'reported'`. 404/410 store nothing (NULL): never invented. Other errors are retried.
+- **Telemetry (measured)**: on a completed job, `GET /repos/{r}/actions/jobs/{id}/logs` with `redirect: "manual"`.
+  The 3xx `Location` is followed exactly once and only to `https` hosts ending in `.blob.core.windows.net` or
+  `.actions.githubusercontent.com` (default port, no userinfo); the storage request carries no `Authorization` header
+  and follows no further redirect. It asks for the last 2 MiB (`Range: bytes=-2097152`); a 200 is streamed through a
+  2 MiB window and abandoned past 64 MiB; a 416 is retried once without `Range`. Only the last line containing
+  `##[runner-telemetry]` is considered; it must be `<timestamp> ##[runner-telemetry]{json}` and the JSON must match
+  `runner-telemetry/v1` exactly (`src/telemetry.mjs`: exact key set, bounded numbers, no text fields except `os` and
+  `arch`). The log bytes live only in memory during parsing; nothing but the validated object is stored
+  (`telemetry_kind = 'measured'`). No line, no telemetry: a job without telemetry is complete, not an error.
+  404 within 10 minutes of completion is retried (logs can lag); later it is final. A refused redirect is logged
+  (host only) and stored as no telemetry.
+- **Token**: an installation token minted for one repository with `{actions: read}` only; a broader grant is revoked
+  and refused. Tokens are cached in memory, never stored or logged. App not configured: rows stored, enrichment skipped.
+
+## Caretaker dashboard (`https://caretaker.vespoli.me/`, var `DASHBOARD_ORIGIN`)
+
+- **Gate** (`src/access.mjs`), before anything else on every request, including `/style.css`, `/api/*` and unknown
+  paths: `Cf-Access-Jwt-Assertion` must be an RS256 JWT signed by a key from
+  `https://vespoli.cloudflareaccess.com/cdn-cgi/access/certs` (cached 1 h; an unknown `kid` triggers one refresh, at
+  most every 30 s), `iss` equal to `ACCESS_TEAM_DOMAIN`, `aud` containing `ACCESS_AUD`, `exp`/`nbf`/`iat` valid with
+  30 s skew, and `email` equal to `OWNER_EMAIL` (case-insensitive). Anything else: 403 with an empty body; the reason
+  code is logged, the token never. The Worker never answers 3xx on this host.
+- **Pages** (GET/HEAD only, 405 otherwise; JSON twins under `/api/` return exactly the data the page renders):
+
+| Page | JSON | Content |
+|---|---|---|
+| `/` | `/api/overview` | event ledger head and chain status (last 1000 entries verified), findings count, last 24 h runs (count, failure rate, duration p50/p95, queue p95, reported billable minutes, estimated minutes), backup summary, repositories |
+| `/events?cursor=&limit=` | `/api/events` | event ledger, newest first, cursor paging (limit 1 to 100) |
+| `/repos/:id/commits?cursor=&limit=` | `/api/repos/:id/commits` | commit ledger and integrity findings |
+| `/repos/:id/verify` | `/api/repos/:id/verify` | `verifyCommitLedger` over the last 1000 entries |
+| `/promotions?repo=` | `/api/promotions` | `main` updates with their `promote/*` tag, PR number, and time from the candidate's `shadow/pr-<n>` push to `main` when both are in the window (newest 200 entries per repository) |
+| `/actions?days=7\|30` | `/api/actions?days=` | by repository, workflow and job: runs, failure rate, duration p50/p95, queue p95, reported and estimated minutes, CPU mean and p95, memory peak |
+
+- **Provenance**: every figure in the JSON is `{value, kind, unit, n}` with `kind` one of `measured` (GitHub event
+  timestamps and conclusions; runner-telemetry samples), `reported` (GitHub billing API, stored verbatim) or
+  `estimated` (derived, never stored). The only estimate is "minutes": for completed runs with no reported billing,
+  the sum of their GitHub-hosted (`runner_group` `GitHub Actions`) job durations rounded up to whole minutes, with no
+  runner-type multiplier. Reported and estimated minutes cover disjoint runs and are never added together. The HTML
+  prints estimates as `≈ n` with an `est.` badge and shows missing data as "missing", never as 0.
+- **Rendering**: server-side HTML, no scripts, no external resources; CSP
+  `default-src 'none'; style-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'` with the
+  stylesheet served by the Worker; `nosniff`, `no-referrer`, `X-Frame-Options: DENY`, `no-store`. Every value is
+  escaped by the `html` template tag (payload text such as repository, workflow, job, branch and author names is
+  untrusted). Light and dark via `prefers-color-scheme`; tables scroll horizontally on a phone.
+- **Bounds**: page limits 1 to 100; 7- or 30-day windows on indexed `created_at`/`queued_at`; at most 10,000 runs and
+  20,000 jobs per query (a "row limit reached" notice when hit); promotions read at most 200 entries for at most 100
+  repositories.
 
 ## Rotating the webhook secret
 
-No human sees the value. Run by the root runner (it holds `CF_SECRETS_WRITE`) with the caretaker App JWT:
+No human sees the value. Run by the root runner (it holds `CF_SECRETS_WRITE`) with the observatory App JWT:
 
 1. Generate a new random secret `N` (32 bytes or more) inside the runner.
-2. Write `N` to `GITHUB_WEBHOOK_SECRET_PREVIOUS`. The Worker now accepts the current secret and `N`.
+2. Write `N` to `OBSERVATORY_WEBHOOK_SECRET_PREVIOUS`. The Worker now accepts the current secret and `N`.
 3. `PATCH /app/hook/config` with `{"secret": N}` using the App JWT. GitHub now signs with `N`.
 4. Redeliver a recent delivery (`POST /app/hook/deliveries/{id}/attempts`) and require 202 (a duplicate is 202).
-5. Write `N` to `GITHUB_WEBHOOK_SECRET`.
-6. Overwrite `GITHUB_WEBHOOK_SECRET_PREVIOUS` with a fresh random value that is discarded (or delete it), so the old
+5. Write `N` to `OBSERVATORY_WEBHOOK_SECRET`.
+6. Overwrite `OBSERVATORY_WEBHOOK_SECRET_PREVIOUS` with a fresh random value that is discarded (or delete it), so the old
    secret is no longer accepted.
 
 The second slot is named "previous" in the ADR; during step 2 to 5 it holds the next secret, which gives the same
 overlap without ever reading a Secrets Store value back. VERIFY how quickly a Secrets Store update reaches running
 Workers before step 3; if it is cached, wait for that interval.
 
-## App and permissions (owner decision required)
+## The observatory App
 
-GitHub only lets an App subscribe to an event when it holds the permission that event needs, so "subscribed to every
-event" means read access to every resource. The existing caretaker App is pinned by `src/policy.mjs` and
-`assertApp` to exactly `contents:read, metadata:read, actions:read, issues:write, pull_requests:write`, and its
-manifest (`src/manifest.mjs`) has webhooks inactive with no events. Widening that App would make `AppVault.install()`
-refuse it. Options: (a) a separate read-only observatory App whose key is `CARETAKER_APP_KEY` (recommended: the event
-App never needs write access, and the MCP App keeps its narrow pin), or (b) widen the pinned set in `policy.mjs`.
-This change does neither; it only uses `contents:read` tokens scoped to one repository.
+The observatory uses its own read-only GitHub App. It shares nothing with the caretaker MCP App (which stays pinned
+by `src/policy.mjs`, `assertApp` and `AppVault` to `contents:read, metadata:read, actions:read, issues:write,
+pull_requests:write` with webhooks inactive). Its credentials have their own names: Secrets Store
+`OBSERVATORY_APP_KEY`, `OBSERVATORY_WEBHOOK_SECRET`, `OBSERVATORY_WEBHOOK_SECRET_PREVIOUS`, and the var
+`OBSERVATORY_APP_ID`. `scripts/check-config.mjs` refuses the retired names `CARETAKER_APP_KEY`, `CARETAKER_APP_ID`,
+`GITHUB_WEBHOOK_SECRET` and `GITHUB_WEBHOOK_SECRET_PREVIOUS` anywhere in `wrangler.jsonc` or `src/`.
 
-Repository and account events to subscribe (VERIFY each name and its permission against
-https://docs.github.com/en/webhooks/webhook-events-and-payloads and the App settings page; `installation`,
-`installation_repositories`, `installation_target` and `github_app_authorization` are always delivered):
+Permissions (all read; pinned as `OBSERVATORY_APP_PERMISSIONS` in `src/github-app.mjs`; tokens are minted per
+repository with a single one of them, `contents` for the commit ledger and `actions` for metrics):
 
-| Permission (read) | Events |
-|---|---|
-| Metadata | `label`, `public`, `repository`, `star`, `watch`, `meta` |
-| Contents | `commit_comment`, `create`, `delete`, `fork`, `gollum`, `push`, `release`, `repository_dispatch`, `workflow_dispatch` |
-| Actions | `workflow_run`, `workflow_job` |
-| Administration | `branch_protection_configuration`, `branch_protection_rule`, `deploy_key`, `member`, `repository_ruleset`, `security_and_analysis`, `repository_import` |
-| Checks | `check_run`, `check_suite` |
-| Commit statuses | `status` |
-| Deployments | `deployment`, `deployment_status`, `deployment_protection_rule`, `deployment_review` |
-| Discussions | `discussion`, `discussion_comment` |
-| Issues | `issues`, `issue_comment`, `milestone`, `sub_issues` |
-| Pull requests | `pull_request`, `pull_request_review`, `pull_request_review_comment`, `pull_request_review_thread` |
-| Merge queues | `merge_group` |
-| Pages | `page_build` |
-| Packages | `package`, `registry_package` |
-| Code scanning alerts | `code_scanning_alert` |
-| Dependabot alerts | `dependabot_alert`, `repository_vulnerability_alert` |
-| Secret scanning alerts | `secret_scanning_alert`, `secret_scanning_alert_location`, `secret_scanning_scan` |
-| Repository security advisories | `repository_advisory` |
-| Custom properties | `custom_property_values` |
+| Permission | Read | Needed for |
+|---|---|---|
+| Contents | read | `push`, `create`, `delete`, `release`; commit details for the commit ledger |
+| Pull requests | read | `pull_request`, `pull_request_review` |
+| Actions | read | `workflow_run`, `workflow_job`; run timing and job logs (metrics) |
+| Checks | read | `check_suite` |
+| Commit statuses | read | `status` |
+| Deployments | read | `deployment`, `deployment_status` |
+| Packages | read | `package` |
+| Administration | read | only so the App can receive `repository_ruleset` and `branch_protection_rule` |
+| Metadata | read | `repository` (mandatory for every App) |
 
-Organisation-only events (`organization`, `team`, `team_add`, `membership`, `projects_v2*`, `org_block`,
-`personal_access_token_request`, `sponsorship`) do not occur for a personal-account installation.
+Events, exactly (pinned as `OBSERVATORY_APP_EVENTS`): `push`, `create`, `delete`, `release`, `pull_request`,
+`pull_request_review`, `workflow_run`, `workflow_job`, `check_suite`, `status`, `deployment`, `deployment_status`,
+`repository`, `repository_ruleset`, `branch_protection_rule`, `package`. GitHub also always delivers `ping` and the
+installation events. VERIFY each event's required permission against
+https://docs.github.com/en/webhooks/webhook-events-and-payloads and the App settings page when registering.
 
 ## VERIFY items touched
 
@@ -217,6 +301,15 @@ Organisation-only events (`organization`, `team`, `team_add`, `membership`, `pro
 | `X-GitHub-Api-Version: 2026-03-10` (reused from `src/github.mjs`) | every API call | https://docs.github.com/en/rest/about-the-rest-api/api-versions |
 | `PATCH /app/hook/config` sets the App webhook secret | rotation | https://docs.github.com/en/rest/apps/webhooks |
 | Push payload `commits` holds at most 2048 commits (`commits_truncated` is recorded; the new `main` tip is always judged) | commit ledger completeness | https://docs.github.com/en/webhooks/webhook-events-and-payloads#push |
+| Workers `fetch` rejects `redirect: "error"` (confirmed in workerd 2026-10 via Miniflare: "must be one of follow or manual"); observatory fetches use `"manual"` and treat any 3xx as a failure | every outbound call | https://developers.cloudflare.com/workers/runtime-apis/request/ |
+| `GET /repos/{r}/actions/runs/{id}/timing` is still served and its `billable` shape (`total_ms`, `jobs`, `job_runs`) | reported billing | https://docs.github.com/en/rest/actions/workflow-runs#get-workflow-run-usage |
+| `GET /repos/{r}/actions/jobs/{id}/logs` answers 302 to a signed URL on `*.blob.core.windows.net` or `*.actions.githubusercontent.com`, needs `actions: read`, and the storage host honours a suffix `Range` | telemetry | https://docs.github.com/en/rest/actions/workflow-jobs#download-job-logs-for-a-workflow-run |
+| The raw job log keeps a `##[runner-telemetry]{json}` stdout line verbatim (the runner does not treat the unknown `##[...]` prefix as a command or rewrite it) | telemetry | https://github.com/actions/runner (log/command processing) |
+| `workflow_job.workflow_name`, `runner_group_name`, `run_attempt` and `steps[]` in the webhook payload | jobs/steps rows | https://docs.github.com/en/webhooks/webhook-events-and-payloads#workflow_job |
+| Access JWT claims (`aud` array, `email`, `iss` = team domain) and the certs endpoint format | dashboard gate | https://developers.cloudflare.com/cloudflare-one/identity/authorization-cookie/validating-json/ |
+| Route `caretaker.vespoli.me/*` catches every path on the host, so nothing bypasses the Worker's gate | dashboard | https://developers.cloudflare.com/workers/configuration/routing/routes/ |
+| D1 binding without `database_id`: deploy behaviour (auto-provisioning) | activation | https://developers.cloudflare.com/d1/ |
+| Service-binding RPC `BackupStatus.summary()` return shape | overview | the backup repository's read API |
 
 ## Changes the owner must apply in protected paths
 
@@ -243,3 +336,10 @@ jobs:
 - Event ledger entries are not mirrored to R2 individually; integrity outside the Durable Object rests on the raw
   deliveries plus hourly checkpoints.
 - Very large deliveries (near 25 MiB) are buffered in memory while being stored; GitHub caps payloads at 25 MB.
+- Run billing is per run, not per attempt: the timing response is stored on the attempt whose `completed` event
+  fetched it. Job rows carry no minutes for that reason.
+- Workflow and job grouping on `/actions` is by name; a renamed workflow shows as two rows.
+- Promotions are derived from ledger time (`recorded_at`), which trails the push by the commit-detail lookups; the
+  time from PR head to `main` is not derivable from the ledger (the head is only in the tag message) and is omitted.
+- Telemetry is advisory: any step can print a line with the marker. The action must be the first step so its post
+  step runs last and its line is the last one; a forged later line would still have to pass the strict schema.

@@ -9,7 +9,7 @@ const OWNER = 215839550;
 
 function setup(overrides = {}) {
   const now = clock(), storage = sqlStorage(), EVENTS = memoryR2(), current = randomSecret();
-  const env = { GITHUB_OWNER_ID: String(OWNER), EVENTS, GITHUB_WEBHOOK_SECRET: secret(current), ...overrides };
+  const env = { GITHUB_OWNER_ID: String(OWNER), EVENTS, OBSERVATORY_WEBHOOK_SECRET: secret(current), ...overrides };
   const core = new EventLedgerCore(storage, env, { now });
   env.EVENT_LEDGER = { idFromName: n => n, get: () => core };
   return { env, core, storage, EVENTS, current, now };
@@ -119,17 +119,17 @@ test('only POST /github exists; everything else is 404 and nothing is ever a red
 
 test('rotation: the previous secret verifies while bound; an absent previous secret is ignored', async () => {
   const old = randomSecret();
-  let ctx = setup({ GITHUB_WEBHOOK_SECRET_PREVIOUS: secret(old) });
+  let ctx = setup({ OBSERVATORY_WEBHOOK_SECRET_PREVIOUS: secret(old) });
   assert.equal((await handleWebhook(await delivery(old, pushPayload()), ctx.env)).status, 202);
   assert.equal((await handleWebhook(await delivery(ctx.current, pushPayload()), ctx.env)).status, 202);
-  ctx = setup({ GITHUB_WEBHOOK_SECRET_PREVIOUS: { get: async () => { throw Error('secret not found'); } } });
+  ctx = setup({ OBSERVATORY_WEBHOOK_SECRET_PREVIOUS: { get: async () => { throw Error('secret not found'); } } });
   assert.equal((await handleWebhook(await delivery(old, pushPayload()), ctx.env)).status, 401);
   assert.equal((await handleWebhook(await delivery(ctx.current, pushPayload()), ctx.env)).status, 202);
 });
 
 test('an unavailable or plain-var webhook secret fails closed with 500 and stores nothing', async () => {
   for (const binding of [undefined, 'plain-string-var', { get: async () => '' }, { get: async () => { throw Error('down'); } }]) {
-    const ctx = setup({ GITHUB_WEBHOOK_SECRET: binding }), response = await handleWebhook(await delivery(randomSecret(), pushPayload()), ctx.env);
+    const ctx = setup({ OBSERVATORY_WEBHOOK_SECRET: binding }), response = await handleWebhook(await delivery(randomSecret(), pushPayload()), ctx.env);
     assert.equal(response.status, 500); assert.equal(await response.text(), ''); nothingStored('secret', ctx);
   }
 });

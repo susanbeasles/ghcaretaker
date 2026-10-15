@@ -1,6 +1,6 @@
 // GitHub webhook ingress: POST https://hooks.vespoli.me/github (ADR-0001 section 2).
-// Authentication is X-Hub-Signature-256 (HMAC-SHA256 over the raw body bytes) against GITHUB_WEBHOOK_SECRET and,
-// during rotation, GITHUB_WEBHOOK_SECRET_PREVIOUS. Unsigned or malformed: 401, empty body, nothing stored.
+// Authentication is X-Hub-Signature-256 (HMAC-SHA256 over the raw body bytes) against OBSERVATORY_WEBHOOK_SECRET and,
+// during rotation, OBSERVATORY_WEBHOOK_SECRET_PREVIOUS. Unsigned or malformed: 401, empty body, nothing stored.
 // Order of effects: reserve in the event ledger, write R2 (never rewrite), append the ledger entry, then 202.
 import { CodedError, BodyTooLarge, constantTimeEqual, decodeUtf8, hexToBytes, isPlainObject, readBounded, sha256Hex, utf8 } from './bytes.mjs';
 import { readSecret, readOptionalSecret } from './secrets.mjs';
@@ -49,9 +49,9 @@ export async function authenticate(request, env) {
   try { bytes = await readBounded(request.body, MAX_BODY_BYTES); }
   catch (e) { return { status: 401, reason: e instanceof BodyTooLarge ? 'body_too_large' : 'body_unreadable' }; }
   let secrets;
-  try { secrets = [await readSecret(env.GITHUB_WEBHOOK_SECRET)]; }
+  try { secrets = [await readSecret(env.OBSERVATORY_WEBHOOK_SECRET)]; }
   catch (e) { return { status: 500, reason: 'webhook_secret_unavailable', severity: 'critical', error: errorCode(e) }; }
-  const previous = await readOptionalSecret(env.GITHUB_WEBHOOK_SECRET_PREVIOUS);
+  const previous = await readOptionalSecret(env.OBSERVATORY_WEBHOOK_SECRET_PREVIOUS);
   if (previous) secrets.push(previous);
   if (!await signatureValid(request.headers.get('x-hub-signature-256'), bytes, secrets)) return { status: 401, reason: 'bad_signature' };
   let text, payload;

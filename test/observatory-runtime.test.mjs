@@ -22,8 +22,8 @@ test('real runtime: webhook capture, dedupe, refusal, host isolation, ledgers an
   const mf = new Miniflare(convertV4MiniflareOptions({ workers: [
     { name: 'ghcaretaker', modules: true, script: output.outputFiles[0].text, compatibilityDate: '2026-10-05', compatibilityFlags: ['global_fetch_strictly_public'],
       bindings: { AUTH_ORIGIN: 'https://control.vespoli.me', PUBLIC_ORIGIN: 'https://mcp.vespoli.me', MCP_PATH: '/ghcaretaker', HOOKS_ORIGIN: 'https://hooks.vespoli.me',
-        GITHUB_OWNER: 'susanbeasles', GITHUB_OWNER_ID: '215839550', CARETAKER_APP_ID: '' },
-      secretsStoreSecrets: { GITHUB_WEBHOOK_SECRET: { store_id: STORE, secret_name: 'GITHUB_WEBHOOK_SECRET' } },
+        GITHUB_OWNER: 'susanbeasles', GITHUB_OWNER_ID: '215839550', OBSERVATORY_APP_ID: '' },
+      secretsStoreSecrets: { OBSERVATORY_WEBHOOK_SECRET: { store_id: STORE, secret_name: 'OBSERVATORY_WEBHOOK_SECRET' } },
       serviceBindings: { AUTH_GATEWAY: async () => new Response('gateway'), BACKUP: { name: 'backup', entrypoint: 'BackupIngest' } },
       durableObjects: { APP_VAULT: { className: 'AppVault', useSQLite: true }, EVENT_LEDGER: { className: 'EventLedger', useSQLite: true }, COMMIT_LEDGER: { className: 'CommitLedger', useSQLite: true } },
       r2Buckets: ['AUDIT_BUCKET', 'EVENTS'], d1Databases: ['AUDIT_DB'] },
@@ -31,7 +31,7 @@ test('real runtime: webhook capture, dedupe, refusal, host isolation, ledgers an
   ] }));
   try {
     const key = randomSecret();
-    await (await mf.getSecretsStoreSecretAPI('GITHUB_WEBHOOK_SECRET', 'ghcaretaker'))().create(key);
+    await (await mf.getSecretsStoreSecretAPI('OBSERVATORY_WEBHOOK_SECRET', 'ghcaretaker'))().create(key);
     const payload = { ref: 'refs/heads/main', before: sha(1), after: '0'.repeat(40), created: false, deleted: true, forced: false, pusher: { name: 'x' }, commits: [],
       repository: { id: 42, full_name: 'susanbeasles/demo', owner: { id: 215839550 } }, installation: { id: 7 } };
     const text = JSON.stringify(payload), id = crypto.randomUUID();
