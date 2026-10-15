@@ -77,7 +77,7 @@ test('hourly checkpoint goes to checkpoints/<seq>.json once per advanced head an
 test('backup capture receives {repo_id, reason, delivery_id}; failures retry with backoff, escalate, and are never dropped', async () => {
   const calls = [], alerts = [];
   let failing = true;
-  const backup = { async capture(arg) { calls.push(arg); if (failing) throw Error('backup down'); } };
+  const backup = { async capture(arg) { calls.push(arg); if (failing) throw Error('backup down'); return { ok: true, job_id: 'j' }; } };
   const fetcher = async (url, init) => { alerts.push({ url, body: JSON.parse(init.body), redirect: init.redirect }); return new Response(null, { status: 204 }); };
   const { core, storage, now } = ledger({ backup, fetcher, commitLedger: () => ({ ingest: async () => ({ accepted: true }) }) });
   const r = await append(core, 1, { downstream: [{ kind: 'backup', payload: { repo_id: 42, reason: 'push', delivery_id: 'x' } }] });
@@ -92,6 +92,27 @@ test('backup capture receives {repo_id, reason, delivery_id}; failures retry wit
   failing = false; now.advance(3_600_000); await core.alarm();
   assert.ok(storage.sql.exec("SELECT done_at FROM outbox WHERE kind = 'backup'").toArray()[0].done_at, 'eventually delivered');
   assert.equal(r.state, 'appended');
+});
+
+test('backup refusals are never marked delivered silently: transient codes retry, permanent ones settle with an alert', async () => {
+  const alerts = [];
+  const fetcher = async (url, init) => { alerts.push(JSON.parse(init.body)); return new Response(null, { status: 204 }); };
+  let answer = { ok: false, code: 'enqueue_failed' };
+  const backup = { async capture() { return answer; } };
+  const { core, storage, now } = ledger({ backup, fetcher, commitLedger: () => ({ ingest: async () => ({ accepted: true }) }) });
+  await append(core, 1, { downstream: [{ kind: 'backup', payload: { repo_id: 42, reason: 'push', delivery_id: 'x' } }] });
+  const row = () => storage.sql.exec("SELECT * FROM outbox WHERE kind = 'backup'").toArray()[0];
+  await core.alarm();
+  assert.equal(row().done_at, null, 'enqueue_failed is retried');
+  assert.equal(row().last_error, 'backup_enqueue_failed');
+  answer = undefined; now.advance(3_600_000); await core.alarm();
+  assert.equal(row().done_at, null, 'a malformed answer is retried, never taken as success');
+  answer = { ok: false, code: 'not_in_inventory' }; now.advance(3_600_000); await core.alarm();
+  assert.ok(row().done_at, 'a permanent refusal settles');
+  now.advance(60_000); await core.alarm();
+  const refused = alerts.find(a => a.code === 'backup_capture_refused');
+  assert.ok(refused, 'and raises an operational alert');
+  assert.equal(refused.refusal, 'not_in_inventory'); assert.equal(refused.severity, 'warning');
 });
 
 test('workflow events reach the metrics sink with a reference that readDelivery verifies', async () => {
@@ -120,7 +141,7 @@ test('push and create are handed to the per-repository commit ledger; read API p
     now, commitDetails: async (_r, s) => ({ sha: s, tree: sha(900), parents: [sha(1)], author_name: 'a', author_date: 'd', committer_name: 'c', committer_date: 'd', message_sha256: 'm'.repeat(1).padEnd(64, '0'), verified: false, verification_reason: 'unsigned' }),
     mintToken: async () => ({ token: 'test-token', expires_at: Date.now() + 3_600_000 }), fetcher: async () => new Response(null, { status: 204 }),
   }));
-  const { core, env, now } = ledger({}, { OBSERVATORY_WEBHOOK_SECRET: secret(current), BACKUP: { capture: async () => {} } });
+  const { core, env, now } = ledger({}, { OBSERVATORY_WEBHOOK_SECRET: secret(current), BACKUP: { capture: async () => ({ ok: true, job_id: 'j' }) } });
   env.COMMIT_LEDGER = commitNs;
   const payload = { ref: 'refs/heads/main', before: sha(1), after: sha(2), created: false, deleted: false, forced: false, pusher: { name: 'x' }, commits: [{ id: sha(2) }], repository: { id: 42, full_name: 'susanbeasles/demo', owner: { id: OWNER } }, installation: { id: 7 } };
   const text = JSON.stringify(payload);

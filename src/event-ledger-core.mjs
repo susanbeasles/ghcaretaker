@@ -13,6 +13,9 @@ import { ANCHOR_EVERY, ANCHOR_SCHEMA, anchorFindingDetail, sendBackupAnchor, ver
 import { HOOK_SCHEMA, reconcileHookDeliveries } from './hook-reconcile.mjs';
 import { log, errorCode } from './log.mjs';
 
+// BackupIngest refusals that a retry cannot change.
+const BACKUP_PERMANENT = new Set(['not_in_inventory', 'bad_request']);
+
 const HOUR = 3_600_000, LEASE_MS = 300_000, RETRY_MS = 300_000, KEEP_DONE_MS = 7 * 86_400_000;
 export const CRON_TASKS = Object.freeze(['anchor', 'deliveries']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -185,7 +188,13 @@ export class EventLedgerCore {
       backup: async p => {
         const backup = deps.backup ?? env.BACKUP;
         if (!backup) throw new CodedError('backup_unbound');
-        await backup.capture({ repo_id: p.repo_id, reason: p.reason, delivery_id: p.delivery_id });
+        // BackupIngest.capture answers {ok:false, code} instead of throwing. Permanent refusals settle with an
+        // operational alert (retrying cannot change them); every other refusal is retried by the outbox.
+        const r = await backup.capture({ repo_id: p.repo_id, reason: p.reason, delivery_id: p.delivery_id });
+        if (r?.ok === true) return;
+        const code = typeof r?.code === 'string' ? r.code : 'backup_bad_response';
+        if (BACKUP_PERMANENT.has(code)) { this.operationalAlert('backup_capture_refused', p.delivery_id ?? String(p.repo_id), { severity: 'warning', repo_id: p.repo_id, refusal: code }); return; }
+        throw new CodedError('backup_' + code);
       },
       metrics: p => (deps.metricsSink ?? metricsSinkFor(env)).record(p),
       alert: p => deliverAlert(env, p, deps.fetcher ?? fetch),
