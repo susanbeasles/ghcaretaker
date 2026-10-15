@@ -2,8 +2,11 @@
 
 Implements infra-root ADR-0001 section 2 (event capture, event ledger, commit ledgers, downstream) and section 3
 (workflow metrics collector and the caretaker dashboard). Design decisions:
-[docs/adr/0001-observatory-ingest.md](adr/0001-observatory-ingest.md) and
-[docs/adr/0002-metrics-and-dashboard.md](adr/0002-metrics-and-dashboard.md).
+[docs/adr/0001-observatory-ingest.md](adr/0001-observatory-ingest.md),
+[docs/adr/0002-metrics-and-dashboard.md](adr/0002-metrics-and-dashboard.md) and
+[docs/adr/0003-completeness-and-anchors.md](adr/0003-completeness-and-anchors.md) (acknowledgement contract, duplicate
+and out-of-order deliveries, truncated pushes, reconciliation against GitHub, external anchors, and what they do not
+prove).
 
 ## Status: not activated
 
@@ -36,6 +39,25 @@ Activation checklist (owner or the appropriate runner; none of it needs a human 
    in `verifyLedger` output; a delivery with a wrong signature is 401; the backup Worker records the capture; a test
    force-push to `main` of a scratch repository raises `main_forced_update` at `ALERT_WEBHOOK_URL`.
 
+Completeness and anchors (ADR-0003):
+
+7a. **infra-root**: R2 bucket `observatory-anchors` (already in the names table) with a bucket lock rule on prefix
+    `anchors/` (indefinite, or the longest retention the owner accepts). Like `github-events`, the lock blocks
+    overwrites and deletes, which this Worker never attempts. It does not block the create-only writes it does make
+    (VERIFY https://developers.cloudflare.com/r2/buckets/bucket-locks/). Create it before deploying (VERIFY whether
+    `wrangler deploy` refuses, or auto-provisions, a binding to a missing bucket; infra-root should own it either way).
+7b. The two cron triggers in `wrangler.jsonc` (`7 * * * *` hourly; `37 */6 * * *` refs) deploy with the Worker.
+    Hook-delivery reconciliation needs `OBSERVATORY_APP_ID` and `OBSERVATORY_APP_KEY` (item 5); until then each
+    run records `{ok: false, error: "app_unconfigured"}` and nothing is fetched.
+7c. **backup** (later, optional): a `BackupAnchor` entrypoint storing each anchor in B2 with Object Lock COMPLIANCE,
+    then a `BACKUP_ANCHOR` service binding here (see "External anchors"). Not required for activation.
+7d. Acceptance: after the first hourly cron, `anchors/event/<seq>.json` and `anchors/commit-<repo_id>/<seq>.json`
+    exist and `verifyLedgerAnchor` / `verifyCommitLedgerAnchor` return `ok: true`. A delivery deleted from the ledger
+    side is impossible to stage live, so tamper detection is shown by the tests (`test/anchors.test.mjs`). A
+    delivery answered 500 on purpose (for example during an R2 outage drill) is redelivered by the next hourly run
+    and appears in the ledger. A push of more than 20 commits to a scratch branch records every commit, with
+    `source: api_compare` for those beyond the payload's list.
+
 Metrics and dashboard (section 3):
 
 8. **infra**: create D1 `ghcaretaker-observatory`; put its `database_id` on the `METRICS_DB` entry of `wrangler.jsonc`
@@ -64,6 +86,9 @@ Metrics and dashboard (section 3):
 | Commit ledgers | Durable Object `CommitLedger`, one per `idFromName(String(repo_id))` | Hash chained, append-only. |
 | Commit ledger mirror | R2 `github-events` `commits/<repo_id>/<seq>.json` | Every entry, written once. |
 | Integrity findings | `findings` table in each `CommitLedger`, and `ALERT_WEBHOOK_URL` | Alert retried until delivered. |
+| Ledger findings (`delivery_conflict`, `tail_truncation`, `anchor_mismatch`) | `findings` table in `EventLedger` (commit ledgers record their own anchor findings) | Digests and ids only. |
+| External anchors | R2 `observatory-anchors` `anchors/<ledger>/<seq, 16 digits>.json` | Hourly and every 100 entries, written once; see "External anchors". |
+| Reconciliation state | `meta` and `hook_redeliveries` in `EventLedger`; `meta` in each `CommitLedger` | Watermark, resume cursor, per-guid attempts, last-run summaries. |
 
 Delivery object (JSON, `body` is the raw JSON text exactly as received):
 
@@ -87,9 +112,12 @@ Custom metadata: `sha256` (hex sha256 of the stored object bytes; also sent as t
 | Signed body not UTF-8 JSON object | 401, empty | nothing |
 | `OBSERVATORY_WEBHOOK_SECRET` unavailable | 500, empty | nothing |
 | Delivery id already ledgered with the same body | 202, empty | nothing new |
-| Same delivery id in flight, or already ledgered with a different body | 409, empty | nothing new |
+| Same delivery id with the same body in flight | waits up to 8 s for it: 202 once it committed (or after taking over a released reservation), else 503 | nothing new |
+| Same delivery id, different body (ledgered or in flight) | 409, empty | a `delivery_conflict` finding with both body digests, and its alert; the body is not stored |
 | R2 or ledger failure | 500, empty | possibly the R2 object; never a ledger entry without its object |
 | Accepted | 202, empty | R2 object, ledger entry, outbox rows |
+
+A 2xx is sent only after the R2 create-only write and the ledger commit have completed (`test/durability.test.mjs`).
 
 Never a 3xx. The MCP paths do not exist on `hooks.vespoli.me`, and `/github` does not exist on `mcp.vespoli.me`.
 
@@ -112,11 +140,21 @@ entry_hash = hex(sha256( prev_hash || canonical(entry without entry_hash) ))    
 
 **Commit ledger entry**: `{seq, repo_id, kind, delivery_id, recorded_at, data, prev_hash, entry_hash}` where `data` is
 
-- `kind: "ref_update"`: `{ref, before, after, created, deleted, forced, pusher, delivery_id}` (`pusher` is the
-  pusher's name; the email is not recorded).
+- `kind: "ref_update"`: `{ref, before, after, created, deleted, forced, pusher, delivery_id, size, listed, truncated,
+  complete, gap}` (`pusher` is the pusher's name; the email is not recorded). `size` is the payload's `size` or
+  `null`, `listed` the number of commits the payload listed, `truncated` whether that list was possibly incomplete,
+  `complete` whether every commit of the push's range is recorded (a later `reconcile` entry may complete it; this
+  entry is never changed), `gap` whether `before` differed from the recorded head.
 - `kind: "commit"`: `{sha, tree, parents, author_name, author_date, committer_name, committer_date, message_sha256,
-  verified, verification_reason, ref}` from `GET /repos/{full_name}/commits/{sha}`; `ref` is the ref of the push
-  that first brought the commit into this ledger. One entry per commit per repository.
+  verified, verification_reason, ref, source}` from `GET /repos/{full_name}/commits/{sha}` or from the compare
+  response; `ref` is the ref of the push that first brought the commit into this ledger; `source` is `webhook`
+  (listed in the payload, or its `after`) or `api_compare` (found only through compare). One entry per commit per
+  repository.
+- `kind: "reconcile"`: `{ref, reason, from, to, deleted, compare_status, commits, complete, delivery_id}`.
+  `reason` is `push_backfill` (an incomplete push completed), `ref_gap` (the range a gap skipped), `ref_reconcile`
+  (the head settled against GitHub's refs) or `baseline` (first observation of a ref that predates the ledger,
+  `complete: false`). `commits` is the number of commit entries that follow it. The entry's own `delivery_id`
+  column is the push's delivery id, or `reconcile:<uuid>` for a reconciliation run.
 
 The R2 mirror object `commits/<repo_id>/<seq>.json` is exactly `canonical(entry)` including `entry_hash`, with
 metadata `sha256` and `entry_hash`.
@@ -148,13 +186,69 @@ Raised by the commit ledger (`src/integrity.mjs`); each is stored once and sent 
 | `main_commit_unverified` | A commit reached `main` whose GitHub verification is not `verified: true` (including a commit no longer retrievable: `commit_unavailable_404`) | Promotion should only ever produce GitHub-signed commits. |
 | `main_commit_multiple_parents` | A merge commit reached `main` | `main` must be linear; something bypassed the promoter. |
 | `main_commit_missing_promotion_tag` | No `promote/pr-<n>-<sha12>` tag targeting the commit 15 minutes after it reached `main` | A commit landed without provenance. A tag created later does not clear an already-raised finding. |
+| `force_push` (warning) | Any forced push, or a history rewrite found by reconciliation; detail `{before, after}` | Expected on feature branches; on `main` or tags it comes with the rule above. |
+| `ref_gap` (warning) | A push whose `before` is not the head this ledger recorded (late, out of order or after a missed delivery); detail `{recorded_head, recorded_deleted, before, after}` | None by itself: the skipped range is backfilled and the ref reconciled 10 minutes later. |
+| `incomplete_push` (warning) | A possibly truncated push (or reconciled move) whose full range could not be fetched (`reason`: the compare error or bound) | Retried through the outbox until complete; a `reconcile` entry with `complete: true` closes it. |
+| `ref_drift` (high) | GitHub's ref differs in a way no delivery explains: `deleted_unobserved`, `created_unobserved`, `tag_target_changed`, `history_rewritten`, `compare_unavailable` | Find the missing delivery; for main and tags the matching rule finding is raised too. |
+| `delivery_conflict` (critical, event ledger) | Same `X-GitHub-Delivery` with a different body; detail `{first_body_sha256, second_body_sha256, event, against}` | GitHub never does this: suspect the webhook secret. |
+| `tail_truncation` (critical) | The ledger holds fewer entries, or a lower head, than its latest external anchor | Ledger storage was tampered with or lost. Anchoring of that ledger stops. |
+| `anchor_mismatch` (critical) | The anchored entry, the chain up to it, the entry count, or the anchor chain disagrees with the external anchors (`reason`) | Same. |
 
-Alert body (`schema: ghcaretaker-alert/v1`): `{type: "integrity_finding", code, repo_id, repo, ref, sha, delivery_id,
-entry_seq, finding_id, detail, detected_at}`. Operational alerts use `type: "operational"` with `code`
-`downstream_retrying`, `commit_ledger_stalled`, `promotion_check_failing`, `mirror_conflict` or
-`checkpoint_conflict`. Alerts never contain tokens, bodies or commit messages. Delivery never follows a redirect (`redirect: "manual"`, any 3xx is a failure) and uses
+Every alert carries `severity` (`critical`, `high`, `warning`; the rules of ADR-0001 are `critical`).
+
+Alert body (`schema: ghcaretaker-alert/v1`): `{type: "integrity_finding", code, severity, repo_id, repo, ref, sha,
+delivery_id, entry_seq, finding_id, detail, detected_at}` (event-ledger findings add `ledger: "event"` with
+`repo_id`, `ref`, `sha` null). Operational alerts use `type: "operational"` with `code`
+`downstream_retrying`, `commit_ledger_stalled`, `promotion_check_failing`, `mirror_conflict`,
+`checkpoint_conflict`, `ref_reconcile_failing` or `redelivery_exhausted`. Alerts never contain tokens, bodies or commit messages. Delivery never follows a redirect (`redirect: "manual"`, any 3xx is a failure) and uses
 a 10 s timeout; any non-2xx is retried with backoff (30 s doubling to 1 h) forever, and each failure is logged as a
 `critical` structured line.
+
+## Reconciliation against GitHub (cron, ADR-0003)
+
+| Cron | Work (flagged by `src/cron.mjs`, done by each Durable Object's alarm) |
+|---|---|
+| `7 * * * *` | Event ledger: verify against the latest anchor, write the next one; reconcile hook deliveries. Every commit ledger: verify and anchor. |
+| `37 */6 * * *` | Every commit ledger: reconcile its refs against GitHub. |
+
+- **Hook deliveries** (event ledger, App JWT): `GET /app/hook/deliveries` newest first, down to the last watermark
+  minus 1 h (first run: 3 days), at most 10 pages. A guid not in the ledger, or with no successful attempt, is
+  redelivered with `POST /app/hook/deliveries/{id}/attempts`: at most 20 per run, 3 per guid, 1 h apart, never for
+  a `delivery_conflict` guid. A run cut short stores its cursor and the next one resumes from it. `head()` reports
+  `hook_reconcile` (the last run's counts).
+- **Refs** (each commit ledger, installation token, contents:read): `git/matching-refs/heads` and `/tags` (at most
+  10 pages each) are compared with the recorded heads. Each difference becomes a `reconcile` entry: a baseline,
+  a fast-forward backfilled through compare, or a `ref_drift` finding (see above). The run is skipped while the inbox
+  holds a delivery, refs updated in the last 10 minutes are skipped, and a capped listing never implies a deletion.
+  A `ref_gap` schedules a run 10 minutes later. `head()` reports `refs_last_run`.
+
+## External anchors (R2 `observatory-anchors`, binding `ANCHORS`)
+
+`anchors/<ledger>/<seq, zero-padded to 16 digits>.json`, `ledger` = `event` or `commit-<repo_id>`, written with
+`If-None-Match: *`, body exactly:
+
+```
+canonical({ledger, seq, head_hash, entry_count, created_at, prev_anchor_hash})
+```
+
+`head_hash` is the ledger's `entry_hash` at `seq`, `entry_count` the number of entries with seq ≤ `seq`, and
+`prev_anchor_hash` is the hex sha256 of the previous anchor's exact text (64 zeros for the first). Custom metadata
+`anchor_hash` is the sha256 of this object's text. Written on the hourly cron and every 100 entries, only after the
+ledger verified against the latest anchor, certifying at most 5000 new entries at a time.
+
+Verification (cron, and without side effects through `verifyLedgerAnchor(env)` /
+`verifyCommitLedgerAnchor(env, repoId)`): find the latest anchor by listing the bucket. Then require that the ledger
+head and entry count are ≥ its `seq` (else `tail_truncation`), that the entry at `seq` recomputes to `head_hash`, that
+the count through `seq` equals `entry_count`, that the 1000 entries up to `seq` chain, and that the anchors chain
+(else `anchor_mismatch`). Returns `{ok, ledger, anchor, head_seq, entry_count, problems, chain, blocked}`. After a
+failed verification that ledger is no longer anchored (`anchor_blocked` in `head()`).
+
+Offline: list `anchors/<ledger>/`, check each object's `prev_anchor_hash` against the sha256 of the previous object's
+text, then check the ledger (or its R2 mirror `commits/<repo_id>/`) has an entry at each anchored `seq` whose
+`entry_hash` equals `head_hash`.
+
+Secondary anchor (unbound seam): `BACKUP_ANCHOR.anchor(record)` → `{ok: true}` (service `backup`, entrypoint
+`BackupAnchor`). `BackupIngest.capture` accepts only `{repo_id, reason, delivery_id}` and cannot carry anchors.
 
 ## Downstream
 
@@ -168,8 +262,9 @@ a 10 s timeout; any non-2xx is retried with backoff (30 s doubling to 1 h) forev
   the outbox instead of being dropped. Observation: `{delivery_id, event, action, repo_id, received_at, object_key,
   body_sha256}`. Contract: idempotent per `delivery_id`; throw to be retried.
 - **Read API** (`src/observatory-read.mjs`, used by the dashboard): `recentEvents(env, limit, cursor)`,
-  `ledgerHead(env)`, `knownRepos(env)`, `commitLedger(env, repoId, limit, cursor)`, `findings(env, repoId?)`,
-  `verifyLedger`, `verifyCommitLedger`, `readDelivery`. Cursors are the `next_cursor` of the previous page; limits are
+  `ledgerHead(env)`, `knownRepos(env)`, `commitLedger(env, repoId, limit, cursor)`, `findings(env, repoId?)` (without
+  a repository it includes the event ledger's own findings), `verifyLedger`, `verifyCommitLedger`,
+  `verifyLedgerAnchor`, `verifyCommitLedgerAnchor`, `readDelivery`. Cursors are the `next_cursor` of the previous page; limits are
   1 to 100.
 
 ## Workflow metrics (D1 `ghcaretaker-observatory`, binding `METRICS_DB`)
@@ -300,7 +395,14 @@ https://docs.github.com/en/webhooks/webhook-events-and-payloads and the App sett
 | `GET /repos/{r}/git/matching-refs/tags/promote/pr-` and `GET /git/tags/{sha}` | promotion tag check | https://docs.github.com/en/rest/git/refs , https://docs.github.com/en/rest/git/tags |
 | `X-GitHub-Api-Version: 2026-03-10` (reused from `src/github.mjs`) | every API call | https://docs.github.com/en/rest/about-the-rest-api/api-versions |
 | `PATCH /app/hook/config` sets the App webhook secret | rotation | https://docs.github.com/en/rest/apps/webhooks |
-| Push payload `commits` holds at most 2048 commits (`commits_truncated` is recorded; the new `main` tip is always judged) | commit ledger completeness | https://docs.github.com/en/webhooks/webhook-events-and-payloads#push |
+| Push payload `commits` cap (owner: 20; webhook reference: 2048; Events API: 20) and whether push webhooks carry `size` / `distinct_size`; 20 or more listed, or `size` above the list, triggers compare | commit ledger completeness | https://docs.github.com/en/webhooks/webhook-events-and-payloads#push , https://docs.github.com/en/rest/using-the-rest-api/github-event-types#pushevent |
+| `GET /repos/{r}/compare/{base}...{head}`: `page`/`per_page` pagination, the 250-commit response limit (more than GitHub returns is `compare_incomplete`), `total_commits`, `status`, `merge_base_commit`, oldest-first `commits` with `commit.verification`, a percent-encoded branch name as base | truncated pushes, gaps, reconciliation | https://docs.github.com/en/rest/commits/commits#compare-two-commits |
+| `GET /app/hook/deliveries` (App JWT, Link-header `cursor` pagination, newest first, item fields, retention of about 3 days) and `POST /app/hook/deliveries/{id}/attempts` (App JWT, 202) | missed-delivery reconciliation | https://docs.github.com/en/rest/apps/webhooks#list-deliveries-for-an-app-webhook , https://docs.github.com/en/rest/apps/webhooks#redeliver-a-delivery-for-an-app-webhook |
+| `GET /repos/{r}/git/matching-refs/{heads,tags}` with contents:read, its pagination, and that an annotated tag's `object.sha` is the tag object (as in push `after`) | ref reconciliation | https://docs.github.com/en/rest/git/refs#list-matching-references |
+| R2 bucket lock with create-only (`onlyIf` If-None-Match: *) writes of new keys, and `list` with `startAfter` | external anchors | https://developers.cloudflare.com/r2/buckets/bucket-locks/ , https://developers.cloudflare.com/r2/api/workers/workers-api-reference/ |
+| A Durable Object RPC result is returned only after its SQLite writes are durable (output gates) | 2xx only after commit | https://developers.cloudflare.com/durable-objects/api/storage-api/ |
+| Cron triggers (`scheduled` with `controller.cron`), syntax `37 */6 * * *` | reconciliation, anchors | https://developers.cloudflare.com/workers/configuration/cron-triggers/ |
+| B2 Object Lock COMPLIANCE cannot be shortened or removed before expiry, by anyone | stronger secondary anchor (seam) | https://www.backblaze.com/docs/cloud-storage-object-lock |
 | Workers `fetch` rejects `redirect: "error"` (confirmed in workerd 2026-10 via Miniflare: "must be one of follow or manual"); observatory fetches use `"manual"` and treat any 3xx as a failure | every outbound call | https://developers.cloudflare.com/workers/runtime-apis/request/ |
 | `GET /repos/{r}/actions/runs/{id}/timing` is still served and its `billable` shape (`total_ms`, `jobs`, `job_runs`) | reported billing | https://docs.github.com/en/rest/actions/workflow-runs#get-workflow-run-usage |
 | `GET /repos/{r}/actions/jobs/{id}/logs` answers 302 to a signed URL on `*.blob.core.windows.net` or `*.actions.githubusercontent.com`, needs `actions: read`, and the storage host honours a suffix `Range` | telemetry | https://docs.github.com/en/rest/actions/workflow-jobs#download-job-logs-for-a-workflow-run |
@@ -328,9 +430,16 @@ jobs:
 
 ## Known limits
 
-- The commit ledger records commits listed in the push payload (at most 2048) plus the new `main` tip; a larger push
-  to a non-`main` ref is recorded partially and logged as `push_commits_truncated` (the ADR's `ref_update` fields
-  have no slot for it).
+- A possibly truncated push is completed through compare up to 1000 commits and 32 MiB per range (and whatever limit
+  GitHub's compare has, VERIFY); beyond that it stays `incomplete_push`, retried hourly at the backoff ceiling,
+  forever. A truncated push that creates the default branch, or a truncated tag push, has no compare base: it is
+  recorded `complete: false` with an `incomplete_push` finding and is not retried.
+- A branch created without any delivery reaching the ledger (`created_unobserved`) records the head only, no
+  commits (`complete: false`).
+- Hook-delivery reconciliation only sees what GitHub still lists (about 3 days); ref reconciliation sees current refs
+  only, so a ref that moved and moved back between two runs with both deliveries lost leaves no trace.
+- Entries after the latest anchor (at most 100 or about an hour) are not covered by an anchor; see ADR-0003 for the
+  account-admin threat and why B2 Object Lock through backup is the stronger anchor.
 - `findings(env)` without a repository fans out over every repository the event ledger has seen; fine at personal
   scale, to be replaced by an index if it grows.
 - Event ledger entries are not mirrored to R2 individually; integrity outside the Durable Object rests on the raw

@@ -51,3 +51,15 @@ test('observatory App: read-only, exactly the agreed events, separate from the M
   assert.notDeepEqual(m.default_permissions, mcpPermissions);
   assert.deepEqual(mcpPermissions, { contents: 'read', metadata: 'read', actions: 'read', issues: 'write', pull_requests: 'write' }, 'MCP App pin unchanged');
 });
+
+test('completeness configuration: anchors bucket, exact cron triggers matching the dispatcher, no anchor seam on BackupIngest', async () => {
+  const { CRONS } = await import('../src/cron.mjs');
+  const { OBSERVATORY_CRONS } = await import('../scripts/check-config.mjs');
+  assert.deepEqual(OBSERVATORY_CRONS, [...CRONS]);
+  assert.deepEqual(config().triggers.crons, [...CRONS]);
+  assert.ok(config().r2_buckets.some(b => b.binding === 'ANCHORS' && b.bucket_name === 'observatory-anchors'));
+  assert.ok(!config().services.some(x => x.binding === 'BACKUP_ANCHOR'), 'the secondary anchor seam stays unbound until backup ships it');
+  for (const fn of [c => { c.r2_buckets = c.r2_buckets.filter(b => b.binding !== 'ANCHORS'); }, c => { c.r2_buckets.find(b => b.binding === 'ANCHORS').bucket_name = 'github-events'; },
+    c => { c.triggers.crons = []; }, c => { c.triggers.crons = ['* * * * *', ...c.triggers.crons]; },
+    c => { c.services.push({ binding: 'BACKUP_ANCHOR', service: 'backup', entrypoint: 'BackupIngest' }); }]) assert.throws(() => check(mutate(fn)), String(fn));
+});

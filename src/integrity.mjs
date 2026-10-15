@@ -6,7 +6,35 @@ export const PROMOTION_GRACE_MS = 15 * 60 * 1000;
 export const FINDING_KINDS = Object.freeze([
   'main_forced_update', 'main_deleted', 'tag_forced_update', 'tag_deleted', 'tag_moved',
   'main_commit_unverified', 'main_commit_multiple_parents', 'main_commit_missing_promotion_tag',
+  // Completeness and tamper evidence (ADR-0003 of this repository).
+  'force_push', 'ref_gap', 'ref_drift', 'incomplete_push', 'delivery_conflict', 'tail_truncation', 'anchor_mismatch',
 ]);
+
+// Carried in every alert. `critical`: integrity of main, tags or a ledger is in doubt. `high`: the ledger and GitHub
+// disagree in a way the ledger cannot explain. `warning`: expected in normal use but worth a look.
+export const FINDING_SEVERITY = Object.freeze({
+  main_forced_update: 'critical', main_deleted: 'critical', tag_forced_update: 'critical', tag_deleted: 'critical', tag_moved: 'critical',
+  main_commit_unverified: 'critical', main_commit_multiple_parents: 'critical', main_commit_missing_promotion_tag: 'critical',
+  delivery_conflict: 'critical', tail_truncation: 'critical', anchor_mismatch: 'critical',
+  ref_drift: 'high', force_push: 'warning', ref_gap: 'warning', incomplete_push: 'warning',
+});
+export const severityOf = kind => FINDING_SEVERITY[kind] ?? 'high';
+
+// The ref this ledger last recorded ({sha, deleted} or null) against an incoming push. A push whose `before` is not
+// that head was delivered late, out of order, or after a missed delivery: a gap. Returns null when in sequence, or
+// when the push only confirms the recorded head (a reconciliation already moved the ref there).
+export function refGap(recorded, push) {
+  if (!recorded) return null;
+  const head = recorded.deleted ? null : recorded.sha;
+  if (head === null ? ZERO.test(push.before) : push.before === head) return null;
+  if (head !== null && !push.deleted && push.after === head) return null;
+  return { recorded_head: head, recorded_deleted: Boolean(recorded.deleted) };
+}
+
+// The generic forced-push record for every ref (main and tags additionally raise their own rule above).
+export function forcePushFinding(update) {
+  return update.forced ? [{ kind: 'force_push', ref: update.ref, sha: update.after, detail: { before: update.before, after: update.after } }] : [];
+}
 
 const isTag = ref => ref.startsWith('refs/tags/');
 

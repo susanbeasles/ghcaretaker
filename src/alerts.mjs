@@ -2,6 +2,7 @@
 // metadata only: no commit messages, no bodies, no tokens. The URL itself is a secret and is never logged.
 import { CodedError, RedirectRefused, fetchNoRedirect } from './bytes.mjs';
 import { readSecret } from './secrets.mjs';
+import { severityOf } from './integrity.mjs';
 
 export async function deliverAlert(env, payload, fetcher = fetch) {
   let url;
@@ -21,7 +22,7 @@ export async function deliverAlert(env, payload, fetcher = fetch) {
 
 export function findingAlert(finding, repo) {
   return {
-    schema: 'ghcaretaker-alert/v1', type: 'integrity_finding', code: finding.kind,
+    schema: 'ghcaretaker-alert/v1', type: 'integrity_finding', code: finding.kind, severity: severityOf(finding.kind),
     repo_id: repo.repo_id, repo: repo.full_name ?? null, ref: finding.ref ?? null, sha: finding.sha ?? null,
     delivery_id: finding.delivery_id ?? null, entry_seq: finding.entry_seq ?? null, finding_id: finding.id,
     detail: finding.detail ?? null, detected_at: finding.detected_at,

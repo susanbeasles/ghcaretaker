@@ -2,6 +2,10 @@
 // Authentication is X-Hub-Signature-256 (HMAC-SHA256 over the raw body bytes) against OBSERVATORY_WEBHOOK_SECRET and,
 // during rotation, OBSERVATORY_WEBHOOK_SECRET_PREVIOUS. Unsigned or malformed: 401, empty body, nothing stored.
 // Order of effects: reserve in the event ledger, write R2 (never rewrite), append the ledger entry, then 202.
+// A 2xx is returned only once the raw delivery is in R2 and its ledger entry is committed (or was committed by an
+// earlier identical delivery). Anything short of that is a 5xx, so GitHub (or reconciliation) delivers it again.
+// The only 4xx after authentication is 409: the same delivery id with different content, which is recorded as a
+// delivery_conflict finding and never replaces the first.
 import { CodedError, BodyTooLarge, constantTimeEqual, decodeUtf8, hexToBytes, isPlainObject, readBounded, sha256Hex, utf8 } from './bytes.mjs';
 import { readSecret, readOptionalSecret } from './secrets.mjs';
 import { downstreamFor, repoIdOf, actionOf } from './routing.mjs';
@@ -13,6 +17,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const EVENT = /^[a-z_]{1,64}$/;
 const NUMERIC = /^[1-9][0-9]{0,19}$/;
 const SIGNATURE = /^sha256=([0-9a-f]{64})$/;
+// An identical delivery already in flight: wait for it to settle (GitHub times a delivery out after 10 s).
+export const BUSY_WAIT_MS = 8_000, BUSY_STEP_MS = 100;
 
 const empty = status => new Response(null, { status, headers: { 'cache-control': 'no-store' } });
 
@@ -62,7 +68,18 @@ export async function authenticate(request, env) {
 
 export function eventLedger(env) { return env.EVENT_LEDGER.get(env.EVENT_LEDGER.idFromName('global')); }
 
-export async function handleWebhook(request, env) {
+// Reserve, waiting while an identical delivery holds the reservation: it either commits (then this is a duplicate)
+// or releases (then this one takes over). Still busy after waitMs: the caller answers 503.
+async function reserve(ledger, input, { sleep = ms => new Promise(r => setTimeout(r, ms)), waitMs = BUSY_WAIT_MS, stepMs = BUSY_STEP_MS, now = Date.now } = {}) {
+  const until = now() + waitMs;
+  for (;;) {
+    const r = await ledger.begin(input);
+    if (r.state !== 'busy' || now() >= until) return r;
+    await sleep(stepMs);
+  }
+}
+
+export async function handleWebhook(request, env, deps = {}) {
   const url = new URL(request.url);
   if (request.method !== 'POST' || url.pathname !== WEBHOOK_PATH) return empty(404);
   const auth = await authenticate(request, env);
@@ -73,9 +90,10 @@ export async function handleWebhook(request, env) {
   const { delivery, bytes, text, payload } = auth;
   try {
     const body_sha256 = await sha256Hex(bytes), ledger = eventLedger(env);
-    const reservation = await ledger.begin({ delivery_id: delivery.delivery_id, body_sha256 });
+    const reservation = await reserve(ledger, { delivery_id: delivery.delivery_id, body_sha256, event: delivery.event }, deps);
     if (reservation.state === 'duplicate') { log('info', 'webhook_duplicate', { delivery_id: delivery.delivery_id, seq: reservation.entry.seq }); return empty(202); }
-    if (reservation.state !== 'reserved') { log('warning', 'webhook_' + reservation.state, { delivery_id: delivery.delivery_id }); return empty(409); }
+    if (reservation.state === 'conflict') { log('critical', 'webhook_delivery_conflict', { delivery_id: delivery.delivery_id, body_sha256 }); return empty(409); }
+    if (reservation.state !== 'reserved') { log('warning', 'webhook_' + reservation.state, { delivery_id: delivery.delivery_id }); return empty(503); }
     const { object_key, received_at, token } = reservation;
     let result;
     try {

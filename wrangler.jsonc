@@ -46,6 +46,10 @@
     {
       "binding": "EVENTS",
       "bucket_name": "github-events"
+    },
+    {
+      "binding": "ANCHORS",
+      "bucket_name": "observatory-anchors"
     }
   ],
   "d1_databases": [
@@ -93,7 +97,10 @@
     }
   ],
   "triggers": {
-    "crons": []
+    "crons": [
+      "7 * * * *",
+      "37 */6 * * *"
+    ]
   },
   "services": [
     {

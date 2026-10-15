@@ -1,6 +1,7 @@
 import {controlRedirect,gatewayRequest} from './ingress.mjs';
 import {handleWebhook} from './webhook.mjs';
 import {handleDashboard} from './dashboard.mjs';
+import {runCron} from './cron.mjs';
 export {AppVault} from './vault.mjs';
 export {CaretakerCapability} from './rpc.mjs';
 export {EventLedger,CommitLedger} from './ledgers.mjs';
@@ -9,4 +10,6 @@ function mcp(request,env){const u=new URL(request.url);if(u.origin!==env.PUBLIC_
 // the Access-verified dashboard (src/dashboard.mjs); every other host keeps the MCP rules.
 export default {async fetch(request,env){const u=new URL(request.url);if(env.HOOKS_ORIGIN&&u.origin===env.HOOKS_ORIGIN)return handleWebhook(request,env);
 if(env.DASHBOARD_ORIGIN&&u.origin===env.DASHBOARD_ORIGIN)return handleDashboard(request,env);
-return mcp(request,env);}};
+return mcp(request,env);},
+// Cron triggers (src/cron.mjs): flag ledger work as due; the ledgers' alarms do it.
+async scheduled(controller,env){await runCron(controller.cron,env);}};

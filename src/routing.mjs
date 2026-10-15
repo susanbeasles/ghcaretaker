@@ -5,6 +5,12 @@ import { isPlainObject } from './bytes.mjs';
 import { SHA } from './github-app.mjs';
 
 export const MAX_PUSH_COMMITS = 2048;
+// Push payloads list a bounded number of commits. The owner's figure is 20 (VERIFY: the webhook reference states 2048,
+// the Events API 20; https://docs.github.com/en/webhooks/webhook-events-and-payloads#push and
+// https://docs.github.com/en/rest/using-the-rest-api/github-event-types#pushevent ). Treating a full list of 20 or more as
+// possibly truncated is safe either way: the commit ledger then asks the compare API for the whole range.
+export const PUSH_PAYLOAD_COMMIT_CAP = 20;
+const BRANCH_NAME = /^(?!\/)(?!.*\/\/)(?!.*\.\.)[A-Za-z0-9._\/-]{1,255}$/;
 const WORKFLOW_EVENTS = new Set(['workflow_run', 'workflow_job']);
 
 export const repoIdOf = payload => Number.isSafeInteger(payload?.repository?.id) && payload.repository.id > 0 ? payload.repository.id : null;
@@ -25,11 +31,18 @@ export function pushSubset(payload, deliveryId) {
   const ref = typeof payload.ref === 'string' && payload.ref.length <= 1024 ? payload.ref : null;
   if (!ref || !sha(payload.before) || !sha(payload.after)) return null;
   const commits = (Array.isArray(payload.commits) ? payload.commits : []).map(c => c?.id).filter(id => typeof id === 'string' && SHA.test(id));
+  const count = v => (Number.isSafeInteger(v) && v >= 0 ? v : null);
+  // `size` / `distinct_size`: VERIFY they are present in push webhooks (documented for the Events API PushEvent).
+  const size = count(payload.size), distinctSize = count(payload.distinct_size), listed = Math.min(commits.length, MAX_PUSH_COMMITS);
+  const defaultBranch = typeof payload.repository.default_branch === 'string' && BRANCH_NAME.test(payload.repository.default_branch) ? payload.repository.default_branch : null;
   return {
     type: 'push', ...common(payload, deliveryId), ref, before: payload.before, after: payload.after,
     created: payload.created === true, deleted: payload.deleted === true, forced: payload.forced === true,
     pusher: typeof payload.pusher?.name === 'string' ? payload.pusher.name.slice(0, 256) : null,
     commits: commits.slice(0, MAX_PUSH_COMMITS), commits_truncated: commits.length > MAX_PUSH_COMMITS,
+    size, distinct_size: distinctSize, default_branch: defaultBranch,
+    // Possibly incomplete list: more than we keep, a full payload page, or fewer listed than the push's size.
+    truncated: payload.deleted !== true && (commits.length > MAX_PUSH_COMMITS || listed >= PUSH_PAYLOAD_COMMIT_CAP || (size !== null && size > listed)),
   };
 }
 

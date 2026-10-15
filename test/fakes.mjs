@@ -49,8 +49,28 @@ export function memoryR2() {
       return { key, customMetadata: o.customMetadata, body: new Blob([o.bytes]).stream(), text: async () => new TextDecoder().decode(o.bytes) };
     },
     json(key) { return JSON.parse(new TextDecoder().decode(objects.get(key).bytes)); },
+    // R2 list semantics used by the anchors: ascending keys, prefix, startAfter (exclusive), limit, opaque cursor.
+    async list({ prefix = '', startAfter, cursor, limit = 1000 } = {}) {
+      const keys = [...objects.keys()].filter(k => k.startsWith(prefix) && (startAfter === undefined || k > startAfter)).sort();
+      const from = cursor ? Number(cursor) : 0, page = keys.slice(from, from + limit), truncated = from + limit < keys.length;
+      return { objects: page.map(key => ({ key, customMetadata: objects.get(key).customMetadata })), truncated, ...(truncated ? { cursor: String(from + limit) } : {}) };
+    },
   };
   return bucket;
+}
+
+// Captures structured log lines (console.log/warn/error) while `fn` runs, for "nothing sensitive is logged" checks.
+export async function captureLogs(fn) {
+  const lines = [], saved = { log: console.log, warn: console.warn, error: console.error };
+  for (const k of Object.keys(saved)) console[k] = (...a) => lines.push(a.map(String).join(' '));
+  try { return { result: await fn(), lines }; } finally { Object.assign(console, saved); }
+}
+
+// A promise with its resolver exposed, for holding an effect open while a test observes the caller.
+export function deferred() {
+  let resolve, reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
 }
 
 export const secret = value => ({ get: async () => value });

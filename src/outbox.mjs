@@ -3,6 +3,7 @@
 import { log, errorCode } from './log.mjs';
 
 export const ESCALATE_AT = 8;
+export const DEFER_MS = 30_000;
 export const backoff = attempts => Math.min(30_000 * 2 ** Math.min(attempts, 10), 3_600_000);
 
 export const OUTBOX_SCHEMA = [
@@ -38,6 +39,8 @@ export async function drain(sql, handlers, { now, limit = 25, source }) {
       await handler(JSON.parse(row.payload));
       sql.exec('UPDATE outbox SET done_at = ?, last_error = NULL WHERE id = ?', now(), row.id);
     } catch (error) {
+      // `deferred`: the handler ran out of this run's API budget. Not a failure: no attempt counted, retried shortly.
+      if (error?.code === 'deferred') { sql.exec('UPDATE outbox SET next_attempt_at = ? WHERE id = ?', now() + DEFER_MS, row.id); continue; }
       const attempts = row.attempts + 1, code = errorCode(error);
       sql.exec('UPDATE outbox SET attempts = ?, next_attempt_at = ?, last_error = ? WHERE id = ?', attempts, now() + backoff(attempts), code, row.id);
       log(row.kind === 'alert' ? 'critical' : 'warning', 'outbox_delivery_failed', { source, kind: row.kind, outbox_id: row.id, attempts, error: code });

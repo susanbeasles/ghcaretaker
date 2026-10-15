@@ -15,6 +15,10 @@ export class EventLedger extends DurableObject {
   recent(limit, cursor) { return this.core.recent(limit, cursor); }
   repos() { return this.core.repos(); }
   verify(fromSeq, toSeq) { return this.core.verify(fromSeq, toSeq); }
+  verifyAnchor() { return this.core.verifyAnchor(); }
+  findings(limit, cursor) { return this.core.findings(limit, cursor); }
+  requestCron(tasks) { return this.core.requestCron(tasks); }
+  ledgeredRepos() { return this.core.ledgeredRepos(); }
   alarm() { return this.core.alarm(); }
 }
 
@@ -26,5 +30,7 @@ export class CommitLedger extends DurableObject {
   entries(limit, cursor) { return this.core.entries(limit, cursor); }
   findings(limit, cursor) { return this.core.findings(limit, cursor); }
   verify(fromSeq, toSeq) { return this.core.verify(fromSeq, toSeq); }
+  verifyAnchor() { return this.core.verifyAnchor(); }
+  requestCron(tasks) { return this.core.requestCron(tasks); }
   alarm() { return this.core.alarm(); }
 }

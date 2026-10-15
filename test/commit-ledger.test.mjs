@@ -42,8 +42,10 @@ test('a promoted fast-forward of main: ref_update + commit entries, chained, mir
   await core.alarm();
   const page = core.entries(10).items.reverse();
   assert.deepEqual(page.map(e => [e.seq, e.kind]), [[1, 'ref_update'], [2, 'commit'], [3, 'commit']]);
-  assert.deepEqual(page[0].data, { ref: 'refs/heads/main', before: sha(1), after: sha(3), created: false, deleted: false, forced: false, pusher: 'susanbeasles', delivery_id: page[0].delivery_id });
-  assert.deepEqual(Object.keys(page[1].data).sort(), ['author_date', 'author_name', 'committer_date', 'committer_name', 'message_sha256', 'parents', 'ref', 'sha', 'tree', 'verification_reason', 'verified']);
+  assert.deepEqual(page[0].data, { ref: 'refs/heads/main', before: sha(1), after: sha(3), created: false, deleted: false, forced: false, pusher: 'susanbeasles', delivery_id: page[0].delivery_id,
+    size: null, listed: 2, truncated: false, complete: true, gap: false });
+  assert.deepEqual(Object.keys(page[1].data).sort(), ['author_date', 'author_name', 'committer_date', 'committer_name', 'message_sha256', 'parents', 'ref', 'sha', 'source', 'tree', 'verification_reason', 'verified']);
+  assert.deepEqual(page.slice(1).map(e => e.data.source), ['webhook', 'webhook']);
   assert.equal(page[1].data.sha, sha(2)); assert.equal(page[2].prev_hash, page[1].entry_hash);
   assert.equal((await core.verify()).ok, true);
   for (const e of page) assert.equal(new TextDecoder().decode(EVENTS.objects.get(commitMirrorKey(REPO, e.seq)).bytes), canonical(e));
@@ -61,10 +63,10 @@ test('forced update and deletion of main are findings and alerts carry no secret
   await core.ingest(push({ forced: true, before: sha(5), after: sha(2) }));
   await core.ingest(push({ deleted: true, before: sha(2), after: ZERO, commits: [] }));
   await core.alarm();
-  assert.deepEqual(kinds(core), ['main_deleted', 'main_forced_update']);
+  assert.deepEqual(kinds(core), ['force_push', 'main_deleted', 'main_forced_update']);
   const forced = alerts.find(a => a.body.code === 'main_forced_update');
   assert.equal(forced.url, 'https://alerts.invalid/caretaker'); assert.equal(forced.init.redirect, 'manual'); assert.ok(forced.init.signal);
-  assert.deepEqual({ ...forced.body, finding_id: 0, detected_at: 0, delivery_id: 0 }, { schema: 'ghcaretaker-alert/v1', type: 'integrity_finding', code: 'main_forced_update',
+  assert.deepEqual({ ...forced.body, finding_id: 0, detected_at: 0, delivery_id: 0 }, { schema: 'ghcaretaker-alert/v1', type: 'integrity_finding', code: 'main_forced_update', severity: 'critical',
     repo_id: REPO, repo: 'susanbeasles/demo', ref: 'refs/heads/main', sha: sha(2), delivery_id: 0, entry_seq: 1, finding_id: 0, detail: { before: sha(5), after: sha(2) }, detected_at: 0 });
   for (const a of alerts) assert.ok(!JSON.stringify(a.body).includes('token-for-tests'));
 });
@@ -123,14 +125,15 @@ test('tags: forced update, in-place move, deletion and re-creation elsewhere are
   await core.ingest(push({ ref: tag, deleted: true, before: sha(11), after: ZERO, commits: [] }));
   await core.ingest(push({ ref: tag, created: true, before: ZERO, after: sha(12), commits: [] }));
   await core.alarm();
-  assert.deepEqual(kinds(core), ['tag_deleted', 'tag_forced_update', 'tag_moved', 'tag_moved']);
+  assert.deepEqual(kinds(core), ['force_push', 'tag_deleted', 'tag_forced_update', 'tag_moved', 'tag_moved']);
   const moved = core.findings().items.filter(f => f.kind === 'tag_moved').map(f => f.detail);
   assert.deepEqual(moved.sort((a, b) => a.to.localeCompare(b.to)), [{ from: sha(10), to: sha(11) }, { from: sha(11), to: sha(12) }].sort((a, b) => a.to.localeCompare(b.to)));
 });
 
 test('alert delivery failure is retried by alarm until delivered, never dropped', async () => {
   const { core, now, alerts, storage } = setup({ alertStatus: n => (n < 3 ? 503 : 204), tagged: () => true });
-  await core.ingest(push({ forced: true }));
+  // One finding (main_deleted), so exactly one alert row is retried; a forced push now raises two findings.
+  await core.ingest(push({ deleted: true, before: sha(2), after: ZERO, commits: [] }));
   await core.alarm();
   assert.equal(alerts.length, 1);
   let row = storage.sql.exec("SELECT * FROM outbox WHERE kind = 'alert'").toArray()[0];

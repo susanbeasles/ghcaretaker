@@ -6,8 +6,10 @@ export function config(){return JSON.parse(fs.readFileSync(path.join(root,'wrang
 export function check(c,production=false){
  if(c.name!=='ghcaretaker'||c.main!=='src/index.mjs'||c.workers_dev!==false)throw Error('Unexpected Worker entrypoint or workers.dev ingress');
  if(c.vars.GITHUB_OWNER!=='susanbeasles'||c.vars.GITHUB_OWNER_ID!=='215839550')throw Error('Personal owner must remain pinned');
- if(c.r2_buckets?.length!==2||!c.r2_buckets.some(b=>b.binding==='AUDIT_BUCKET'&&b.bucket_name==='ghcaretaker-audit'))throw Error('Dedicated audit bucket required');
+ if(c.r2_buckets?.length!==3||!c.r2_buckets.some(b=>b.binding==='AUDIT_BUCKET'&&b.bucket_name==='ghcaretaker-audit'))throw Error('Dedicated audit bucket required');
  if(!c.r2_buckets.some(b=>b.binding==='EVENTS'&&b.bucket_name==='github-events'))throw Error('github-events capture bucket required');
+ // External anchors live in their own locked bucket, never in the bucket they vouch for (docs/adr/0003).
+ if(!c.r2_buckets.some(b=>b.binding==='ANCHORS'&&b.bucket_name==='observatory-anchors'))throw Error('observatory-anchors anchor bucket required');
  if(c.preview_urls!==false)throw Error('Preview URLs must stay disabled');
  if(c.d1_databases?.length!==2||c.d1_databases[0].binding!=='AUDIT_DB'||c.d1_databases[0].database_name!=='ghcaretaker-audit'||c.d1_databases[0].migrations_dir!=='migrations')throw Error('Dedicated audit database required');
  if(!c.durable_objects?.bindings?.some(x=>x.name==='APP_VAULT'&&x.class_name==='AppVault'))throw Error('Credential vault required');
@@ -30,6 +32,7 @@ export function check(c,production=false){
  if(!c.d1_databases[1].database_id)console.warn('Pending activation: METRICS_DB has no database_id; set the id of D1 ghcaretaker-observatory created by infra');
 }
 const SECRETS_STORE='b6504fe2d5f64352954629bc7185fb79';
+export const OBSERVATORY_CRONS=['7 * * * *','37 */6 * * *'];
 const OBSERVATORY_SECRETS=['OBSERVATORY_WEBHOOK_SECRET','OBSERVATORY_WEBHOOK_SECRET_PREVIOUS','OBSERVATORY_APP_KEY','ALERT_WEBHOOK_URL'];
 // The observatory is its own read-only GitHub App: its credentials must never share or resemble the MCP App's names.
 export const RETIRED_OBSERVATORY_NAMES=/\b(?:CARETAKER_APP_KEY|CARETAKER_APP_ID|GITHUB_WEBHOOK_SECRET(?:_PREVIOUS)?)\b/;
@@ -48,6 +51,10 @@ function checkObservatory(c){
   if(!c.migrations?.some(m=>m.new_sqlite_classes?.includes(class_name)))throw Error('Ledger classes must be SQLite-backed: '+class_name);
  }
  if(!c.services.some(x=>x.binding==='BACKUP'&&x.service==='backup'&&x.entrypoint==='BackupIngest'))throw Error('Backup ingest service binding required');
+ // Completeness crons (src/cron.mjs dispatches on these exact strings).
+ if(JSON.stringify(c.triggers?.crons)!==JSON.stringify(OBSERVATORY_CRONS))throw Error('Cron triggers must be exactly '+OBSERVATORY_CRONS.join(', '));
+ // The secondary anchor seam stays unbound until the backup service ships an anchor entrypoint (docs/adr/0003).
+ if(c.services.some(x=>x.binding==='BACKUP_ANCHOR'&&x.entrypoint==='BackupIngest'))throw Error('BACKUP_ANCHOR must not reuse BackupIngest (its contract is capture only)');
  const bound=c.secrets_store_secrets||[];
  for(const name of OBSERVATORY_SECRETS)if(!bound.some(x=>x.binding===name&&x.secret_name===name&&x.store_id===SECRETS_STORE))throw Error('Secrets Store binding required: '+name);
  // Secrets come only from Secrets Store; a same-named plain var is refused.
