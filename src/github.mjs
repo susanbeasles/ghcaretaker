@@ -2,6 +2,7 @@ import {appJWT} from './crypto.mjs';
 import {permissions,route} from './policy.mjs';
 import {audit,redact} from './audit.mjs';
 import {inlineFile} from './content.mjs';
+import {fetchNoRedirect} from './bytes.mjs';
 export class UpstreamError extends Error {constructor(status,category){super('GitHub request failed');this.status=status;this.category=category;}}
 export function category(status,headers){return status===401?'credential':status===403?(headers.get('x-ratelimit-remaining')==='0'||headers.has('retry-after')?'error':'credential'):status>=400?'error':'success';}
 async function bounded(response,limit=4*1024*1024){
@@ -15,7 +16,8 @@ export async function github(env,identity,name,args,correlation,fetcher=fetch){
  async function call(path,method,token,body,operation,credential=false){
   await audit(env,{correlation_id:correlation,category:'success',phase:'intent',operation,request:{method,path,body}});
   let response,text;
-  try{response=await fetcher('https://api.github.com'+path,{method,redirect:'error',signal:AbortSignal.timeout(20000),headers:{Authorization:'Bearer '+token,Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2026-03-10','User-Agent':'ghcaretaker/0.0.1-beta.2',...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});text=await bounded(response);}
+  // workerd rejects redirect:'error'; fetchNoRedirect sends 'manual' and throws on any 3xx (handled below as uncertain).
+  try{response=await fetchNoRedirect(fetcher,'https://api.github.com'+path,{method,signal:AbortSignal.timeout(20000),headers:{Authorization:'Bearer '+token,Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2026-03-10','User-Agent':'ghcaretaker/0.0.1-beta.2',...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});text=await bounded(response);}
   catch{await audit(env,{correlation_id:correlation,category:'error',phase:'uncertain',operation,response:{message:'Network failure, redirect, timeout or oversized response. Mutation outcome may be unknown.'}});throw new UpstreamError(502,'error');}
   let data;try{data=JSON.parse(text);}catch{data={text};}
   const cat=category(response.status,response.headers);

@@ -7,6 +7,7 @@
     "global_fetch_strictly_public"
   ],
   "workers_dev": false,
+  "preview_urls": false,
   "keep_vars": true,
   "observability": {
     "enabled": true,
@@ -29,12 +30,26 @@
     "GITHUB_OWNER_ID": "215839550",
     "MCP_PATH": "/ghcaretaker",
     "PUBLIC_ORIGIN": "https://mcp.vespoli.me",
-    "AUTH_ORIGIN": "https://control.vespoli.me"
+    "AUTH_ORIGIN": "https://control.vespoli.me",
+    "HOOKS_ORIGIN": "https://hooks.vespoli.me",
+    "OBSERVATORY_APP_ID": "",
+    "DASHBOARD_ORIGIN": "https://caretaker.vespoli.me",
+    "ACCESS_TEAM_DOMAIN": "https://vespoli.cloudflareaccess.com",
+    "ACCESS_AUD": "",
+    "OWNER_EMAIL": ""
   },
   "r2_buckets": [
     {
       "binding": "AUDIT_BUCKET",
       "bucket_name": "ghcaretaker-audit"
+    },
+    {
+      "binding": "EVENTS",
+      "bucket_name": "github-events"
+    },
+    {
+      "binding": "ANCHORS",
+      "bucket_name": "observatory-anchors"
     }
   ],
   "d1_databases": [
@@ -43,6 +58,11 @@
       "database_name": "ghcaretaker-audit",
       "database_id": "02b01e07-fea9-4ee3-8801-fde7a7d14199",
       "migrations_dir": "migrations"
+    },
+    {
+      "binding": "METRICS_DB",
+      "database_name": "ghcaretaker-observatory",
+      "migrations_dir": "migrations-observatory"
     }
   ],
   "durable_objects": {
@@ -50,6 +70,14 @@
       {
         "name": "APP_VAULT",
         "class_name": "AppVault"
+      },
+      {
+        "name": "EVENT_LEDGER",
+        "class_name": "EventLedger"
+      },
+      {
+        "name": "COMMIT_LEDGER",
+        "class_name": "CommitLedger"
       }
     ]
   },
@@ -59,15 +87,57 @@
       "new_sqlite_classes": [
         "AppVault"
       ]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": [
+        "EventLedger",
+        "CommitLedger"
+      ]
     }
   ],
   "triggers": {
-    "crons": []
+    "crons": [
+      "7 * * * *",
+      "37 */6 * * *"
+    ]
   },
   "services": [
     {
       "binding": "AUTH_GATEWAY",
       "service": "personal-control"
+    },
+    {
+      "binding": "BACKUP",
+      "service": "backup",
+      "entrypoint": "BackupIngest"
+    },
+    {
+      "binding": "BACKUP_STATUS",
+      "service": "backup",
+      "entrypoint": "BackupStatus"
+    }
+  ],
+  "secrets_store_secrets": [
+    {
+      "binding": "OBSERVATORY_WEBHOOK_SECRET",
+      "store_id": "b6504fe2d5f64352954629bc7185fb79",
+      "secret_name": "OBSERVATORY_WEBHOOK_SECRET"
+    },
+    {
+      "binding": "OBSERVATORY_WEBHOOK_SECRET_PREVIOUS",
+      "store_id": "b6504fe2d5f64352954629bc7185fb79",
+      "secret_name": "OBSERVATORY_WEBHOOK_SECRET_PREVIOUS"
+    },
+    {
+      "binding": "OBSERVATORY_APP_KEY",
+      "store_id": "b6504fe2d5f64352954629bc7185fb79",
+      "secret_name": "OBSERVATORY_APP_KEY"
+    },
+    {
+      "binding": "ALERT_WEBHOOK_URL",
+      "store_id": "b6504fe2d5f64352954629bc7185fb79",
+      "secret_name": "ALERT_WEBHOOK_URL"
     }
   ],
   "routes": [
@@ -81,6 +151,14 @@
     },
     {
       "pattern": "mcp.vespoli.me/.well-known/oauth-authorization-server/ghcaretaker/auth*",
+      "zone_name": "vespoli.me"
+    },
+    {
+      "pattern": "hooks.vespoli.me/github",
+      "zone_name": "vespoli.me"
+    },
+    {
+      "pattern": "caretaker.vespoli.me/*",
       "zone_name": "vespoli.me"
     }
   ]

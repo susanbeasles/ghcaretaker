@@ -15,11 +15,17 @@ test('manifest has exact collaboration-only permissions and server callbacks',()
 });
 test('conversion is owner-bound, single-use, persists secrets without returning them',async()=>{
  const a={...app(),pem:await pem()},s=storage();let calls=0;
- const v=new VaultCore(s,env,async(url,options)=>{calls++;assert.equal(options.redirect,'error');assert.equal(url,'https://api.github.com/app-manifests/one-code/conversions');return Response.json(a);});
+ const v=new VaultCore(s,env,async(url,options)=>{calls++;assert.equal(options.redirect,'manual');assert.equal(url,'https://api.github.com/app-manifests/one-code/conversions');return Response.json(a);});
  const state=await v.begin('owner');await assert.rejects(v.convert('one-code',state,'attacker'));assert.equal(calls,0);
  const status=await v.convert('one-code',state,'owner');assert.equal(status.phase,'created');assert.ok(!JSON.stringify(status).includes('hidden'));assert.ok(!JSON.stringify(status).includes('PRIVATE KEY'));
  await assert.rejects(v.convert('one-code',state,'owner'));await assert.rejects(v.begin('owner'));assert.equal(calls,1);
  assert.equal((await v.appJWT()).split('.').length,3);
+});
+test('a 3xx from a credential endpoint is audited and refused, never followed',async()=>{
+ const s=storage(),urls=[];
+ const v=new VaultCore(s,env,async(url,options)=>{urls.push(url);assert.equal(options.redirect,'manual');return new Response(null,{status:307,headers:{location:'https://evil.invalid/conversions'}});});
+ const state=await v.begin('owner');await assert.rejects(v.convert('one-code',state,'owner'),/Setup stopped/);
+ assert.deepEqual(urls,['https://api.github.com/app-manifests/one-code/conversions']);
 });
 test('permission escalation quarantines registration and prevents credential use',async()=>{
  const s=storage(),v=new VaultCore(s,env,async()=>Response.json({...app(),permissions:{...permissions,contents:'write'}}));
