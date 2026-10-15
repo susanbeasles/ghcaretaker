@@ -35,6 +35,9 @@ const SCHEMA = [
   'CREATE TABLE IF NOT EXISTS refs (ref TEXT PRIMARY KEY, sha TEXT NOT NULL, deleted INTEGER NOT NULL, seq INTEGER NOT NULL)',
   `CREATE TABLE IF NOT EXISTS inbox (id INTEGER PRIMARY KEY, delivery_id TEXT NOT NULL UNIQUE, payload TEXT NOT NULL,
     attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL, last_error TEXT, queued_at INTEGER NOT NULL)`,
+  // Every delivery the inbox has applied, written in the same transaction that removes its inbox row: the inbox is
+  // transient, and the event ledger's outbox is at-least-once, so a re-sent delivery must be recognised forever.
+  'CREATE TABLE IF NOT EXISTS applied_deliveries (delivery_id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)',
   'CREATE TABLE IF NOT EXISTS commit_details (sha TEXT PRIMARY KEY, details TEXT NOT NULL)',
   `CREATE TABLE IF NOT EXISTS promotions (sha TEXT PRIMARY KEY, entry_seq INTEGER, delivery_id TEXT NOT NULL, due_at INTEGER NOT NULL,
     next_check_at INTEGER NOT NULL, status TEXT NOT NULL CHECK (status IN ('pending', 'satisfied', 'flagged')),
@@ -94,6 +97,7 @@ export class CommitLedgerCore {
       if (repo === null) this.setMeta('repo_id', item.repo_id);
       if (typeof item.full_name === 'string') this.setMeta('full_name', item.full_name);
       if (Number.isSafeInteger(item.installation_id)) this.setMeta('installation_id', item.installation_id);
+      if (this.sql.exec('SELECT 1 FROM applied_deliveries WHERE delivery_id = ?', item.delivery_id).toArray().length) return;
       this.sql.exec('INSERT INTO inbox (delivery_id, payload, next_attempt_at, queued_at) VALUES (?, ?, ?, ?) ON CONFLICT(delivery_id) DO NOTHING',
         item.delivery_id, JSON.stringify(item), now, now);
     });
@@ -302,6 +306,7 @@ export class CommitLedgerCore {
         if (plan.incomplete?.retry) enqueue(this.sql, { kind: 'backfill', dedupe_key: 'backfill:' + item.delivery_id, payload: {
           ref: item.ref, base: plan.incomplete.base, head: item.after, delivery_id: item.delivery_id, reason: 'push_backfill' } }, now);
         this.sql.exec('DELETE FROM inbox WHERE id = ?', row.id);
+        this.markApplied(item.delivery_id, now);
         this.sql.exec('DELETE FROM push_compare WHERE delivery_id = ?', item.delivery_id);
         for (const sha of plan.shas) this.sql.exec('DELETE FROM commit_details WHERE sha = ?', sha);
       });
@@ -342,7 +347,12 @@ export class CommitLedgerCore {
           'create_event:' + item.ref, at, prefix);
       }
       this.sql.exec('DELETE FROM inbox WHERE id = ?', row.id);
+      this.markApplied(item.delivery_id, this.now());
     });
+  }
+
+  markApplied(deliveryId, now) {
+    this.sql.exec('INSERT INTO applied_deliveries (delivery_id, applied_at) VALUES (?, ?) ON CONFLICT(delivery_id) DO NOTHING', deliveryId, now);
   }
 
   recordFinding(f, now) {
