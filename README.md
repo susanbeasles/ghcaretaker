@@ -34,4 +34,11 @@ request-denial smoke checks also passed. This tooling patch does not change
 provider permissions or deploy a Worker. Authenticated owner OAuth, live
 repository/Actions visibility and durable audit qualification remain separate
 acceptance checks.
->>>>>>> 4fea9a1 (Patch Sharp tooling and document local qualification)
+
+## GitHub event observatory (not activated)
+
+The same Worker also serves `POST https://hooks.vespoli.me/github`: every GitHub App webhook is verified
+(HMAC-SHA256), captured raw to R2 `github-events`, appended to a hash-chained event ledger and, for `push`,
+to a per-repository commit ledger that raises integrity findings. It does not deploy, promote or decide
+anything. See [docs/OBSERVATORY.md](docs/OBSERVATORY.md) for formats, verification, secret rotation and the
+activation steps that remain; nothing in it is live until those steps and their acceptance checks pass.

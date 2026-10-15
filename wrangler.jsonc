@@ -7,6 +7,7 @@
     "global_fetch_strictly_public"
   ],
   "workers_dev": false,
+  "preview_urls": false,
   "keep_vars": true,
   "observability": {
     "enabled": true,
@@ -29,12 +30,18 @@
     "GITHUB_OWNER_ID": "215839550",
     "MCP_PATH": "/ghcaretaker",
     "PUBLIC_ORIGIN": "https://mcp.vespoli.me",
-    "AUTH_ORIGIN": "https://control.vespoli.me"
+    "AUTH_ORIGIN": "https://control.vespoli.me",
+    "HOOKS_ORIGIN": "https://hooks.vespoli.me",
+    "CARETAKER_APP_ID": ""
   },
   "r2_buckets": [
     {
       "binding": "AUDIT_BUCKET",
       "bucket_name": "ghcaretaker-audit"
+    },
+    {
+      "binding": "EVENTS",
+      "bucket_name": "github-events"
     }
   ],
   "d1_databases": [
@@ -50,6 +57,14 @@
       {
         "name": "APP_VAULT",
         "class_name": "AppVault"
+      },
+      {
+        "name": "EVENT_LEDGER",
+        "class_name": "EventLedger"
+      },
+      {
+        "name": "COMMIT_LEDGER",
+        "class_name": "CommitLedger"
       }
     ]
   },
@@ -58,6 +73,13 @@
       "tag": "v1",
       "new_sqlite_classes": [
         "AppVault"
+      ]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": [
+        "EventLedger",
+        "CommitLedger"
       ]
     }
   ],
@@ -68,6 +90,33 @@
     {
       "binding": "AUTH_GATEWAY",
       "service": "personal-control"
+    },
+    {
+      "binding": "BACKUP",
+      "service": "backup",
+      "entrypoint": "BackupIngest"
+    }
+  ],
+  "secrets_store_secrets": [
+    {
+      "binding": "GITHUB_WEBHOOK_SECRET",
+      "store_id": "b6504fe2d5f64352954629bc7185fb79",
+      "secret_name": "GITHUB_WEBHOOK_SECRET"
+    },
+    {
+      "binding": "GITHUB_WEBHOOK_SECRET_PREVIOUS",
+      "store_id": "b6504fe2d5f64352954629bc7185fb79",
+      "secret_name": "GITHUB_WEBHOOK_SECRET_PREVIOUS"
+    },
+    {
+      "binding": "CARETAKER_APP_KEY",
+      "store_id": "b6504fe2d5f64352954629bc7185fb79",
+      "secret_name": "CARETAKER_APP_KEY"
+    },
+    {
+      "binding": "ALERT_WEBHOOK_URL",
+      "store_id": "b6504fe2d5f64352954629bc7185fb79",
+      "secret_name": "ALERT_WEBHOOK_URL"
     }
   ],
   "routes": [
@@ -81,6 +130,10 @@
     },
     {
       "pattern": "mcp.vespoli.me/.well-known/oauth-authorization-server/ghcaretaker/auth*",
+      "zone_name": "vespoli.me"
+    },
+    {
+      "pattern": "hooks.vespoli.me/github",
       "zone_name": "vespoli.me"
     }
   ]
