@@ -61,7 +61,7 @@ async function githubEnv(){
 test('upstream installation identity and exact token scopes pin credentials; GitHub URLs never followed',async()=>{
  const e=await githubEnv(),calls=[];
  const result=await github(e,{scopes:['github:read']},'read_file',{repo:'safe',path:'test.txt'},'corr',async(url,opts)=>{
-  calls.push({url,opts});assert.ok(url.startsWith('https://api.github.com/'));assert.equal(opts.redirect,'error');
+  calls.push({url,opts});assert.ok(url.startsWith('https://api.github.com/'));assert.equal(opts.redirect,'manual');
   if(url.endsWith('/app/installations/123'))return Response.json({account:{login:'personal',type:'User'}});
   if(url.endsWith('/access_tokens')){assert.deepEqual(JSON.parse(opts.body).permissions,{...permissions,issues:'read',pull_requests:'read'});return Response.json({token:'neverlogme',expires_at:new Date(Date.now()+3600000).toISOString(),permissions:JSON.parse(opts.body).permissions});}
   return Response.json({type:'file',encoding:'base64',size:5,content:btoa('hello'),download_url:'https://evil',path:'test.txt'});
@@ -85,4 +85,13 @@ test('write network failures are uncertain and never retried',async()=>{
   if(url.endsWith('/access_tokens'))return Response.json({token:'secret',expires_at:new Date(Date.now()+3600000).toISOString(),permissions});
   writes++;throw Error('timeout');
  }));assert.equal(writes,1);assert.ok(e.events.some(x=>x.phase==='uncertain'));
+});
+test('a GitHub 3xx is refused unfollowed and unread: uncertain 502, Location never requested',async()=>{
+ const e=await githubEnv(),urls=[];
+ await assert.rejects(github(e,{scopes:['github:read']},'get_repository',{repo:'safe'},'corr',async(url,opts)=>{
+  urls.push(url);assert.equal(opts.redirect,'manual');
+  return new Response('{"account":{"login":"personal","type":"User"}}',{status:302,headers:{location:'https://evil.invalid/x'}});
+ }),err=>err.status===502);
+ assert.deepEqual(urls,['https://api.github.com/app/installations/123']);
+ assert.ok(!JSON.stringify(e.events).includes('evil.invalid'));
 });

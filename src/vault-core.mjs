@@ -16,7 +16,8 @@ export class VaultCore{
  async call(url,options,deferResponseAudit=false){
   const operation=url.includes('/conversions')?'manifest_credentials':url.includes('/access_token')?'login_credentials':url.includes('/applications/')?'revoke_login_token':url.endsWith('/user')?'verify_login_owner':'verify_app_installation';
   await this.record('success',operation+'_intent',0);
-  const r=await this.fetcher(url,{...options,redirect:'error',signal:AbortSignal.timeout(20000)});
+  // workerd rejects redirect:'error'. With 'manual' a 3xx is returned unfollowed; it is not ok, so it is audited and refused below.
+  const r=await this.fetcher(url,{...options,redirect:'manual',signal:AbortSignal.timeout(20000)});
   if(!deferResponseAudit)await this.record(r.ok?'success':r.status===401||r.status===403?'credential':'error',operation+'_response',r.status);
   if(!r.ok){await this.record(r.status===401||r.status===403?'credential':'error','app_vault_upstream',r.status);throw Error('GitHub credential operation failed');}
   if(r.status===204)return null;
