@@ -45,6 +45,9 @@ const SCHEMA = [
   'CREATE TABLE IF NOT EXISTS promote_tags (tag TEXT PRIMARY KEY, prefix TEXT NOT NULL, delivery_id TEXT NOT NULL, seen_at TEXT NOT NULL)',
   'CREATE INDEX IF NOT EXISTS promote_tags_prefix ON promote_tags(prefix)',
   'CREATE TABLE IF NOT EXISTS verified_promote_tags (tag TEXT PRIMARY KEY, sha TEXT NOT NULL, actor_id INTEGER NOT NULL, delivery_id TEXT NOT NULL)',
+  'CREATE INDEX IF NOT EXISTS verified_promote_tags_sha_actor ON verified_promote_tags(sha, actor_id)',
+  'CREATE INDEX IF NOT EXISTS verified_promote_tags_sha_actor_tag ON verified_promote_tags(sha, actor_id, tag)',
+  'CREATE TABLE IF NOT EXISTS promotion_check_progress (sha TEXT NOT NULL, actor_id INTEGER NOT NULL, last_tag TEXT NOT NULL, PRIMARY KEY (sha, actor_id))',
   `CREATE TABLE IF NOT EXISTS findings (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, ref TEXT, sha TEXT NOT NULL, entry_seq INTEGER,
     delivery_id TEXT NOT NULL, detail TEXT NOT NULL, detected_at TEXT NOT NULL, UNIQUE (kind, sha, delivery_id))`,
   'CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
@@ -106,9 +109,13 @@ export class CommitLedgerCore {
     return { accepted: true };
   }
 
-  async token() {
+  async token(budget = null) {
     const now = this.now();
     if (this.cachedToken && this.cachedToken.expires_at - now > 300_000) return this.cachedToken.token;
+    if (budget) {
+      if (budget.api <= 0) throw new CodedError('deferred');
+      budget.api--;
+    }
     const installation = Number(this.meta('installation_id'));
     this.cachedToken = await (this.deps.mintToken ?? mintInstallationToken)(this.env, installation, this.repoId(), this.fetcher);
     return this.cachedToken.token;
@@ -153,7 +160,7 @@ export class CommitLedgerCore {
       if (!row || row.next_attempt_at > this.now()) return;
       const item = JSON.parse(row.payload);
       try {
-        if (item.type === 'create') { await this.applyCreate(row, item); continue; }
+        if (item.type === 'create') { await this.applyCreate(row, item, budget); continue; }
         const plan = await this.pushPlan(row, item, budget);
         if (!plan || !await this.fetchDetails(item, plan.shas, budget)) return;
         await this.applyPush(row, item, plan);
@@ -342,13 +349,14 @@ export class CommitLedgerCore {
     return Number.isSafeInteger(id) && id > 0 ? id : 0;
   }
 
-  async applyCreate(row, item) {
+  async applyCreate(row, item, budget) {
     const prefix = item.ref_type === 'tag' ? promotionTagPrefix(item.ref) : null, at = this.iso(this.now());
     let target = null, unavailable = null;
     if (prefix && this.promoterId() && item.actor_id === this.promoterId()) {
       try {
-        target = await (this.deps.promotionTagTarget ?? promotionTagTarget)(this.meta('full_name'), item.ref, await this.token(), this.fetcher);
+        target = await (this.deps.promotionTagTarget ?? promotionTagTarget)(this.meta('full_name'), item.ref, await this.token(budget), this.fetcher, budget);
       } catch (error) {
+        if (error?.code === 'deferred') throw error;
         if (![404, 422].includes(error?.status) && row.attempts + 1 < 12 && this.now() - row.queued_at < 24 * 60 * 60_000) throw error;
         unavailable = errorCode(error);
       }
@@ -359,6 +367,7 @@ export class CommitLedgerCore {
         this.sql.exec('INSERT INTO verified_promote_tags (tag, sha, actor_id, delivery_id) VALUES (?, ?, ?, ?) ON CONFLICT(tag) DO NOTHING', item.ref, target, item.actor_id, item.delivery_id);
         this.sql.exec("UPDATE promotions SET status = 'satisfied', resolved_by = ?, resolved_at = ? WHERE status = 'pending' AND sha = ?",
           'verified_create:' + item.ref, at, target);
+        this.sql.exec('DELETE FROM promotion_check_progress WHERE sha = ?', target);
       }
       if (unavailable) this.operationalAlert('promotion_evidence_unavailable', 'promotion-create:' + item.delivery_id, { ref: item.ref, error: unavailable });
       this.sql.exec('DELETE FROM inbox WHERE id = ?', row.id);
@@ -573,23 +582,31 @@ export class CommitLedgerCore {
     const rows = this.sql.exec("SELECT * FROM promotions WHERE status = 'pending' AND due_at <= ? AND next_check_at <= ? ORDER BY due_at LIMIT 10", now, now).toArray();
     for (const row of rows) {
       if (budget.api <= 0) return;
-      budget.api--;
       try {
-        const evidence = this.sql.exec('SELECT tag FROM verified_promote_tags WHERE sha = ? AND actor_id = ?', row.sha, this.promoterId()).toArray();
+        const actorId = this.promoterId();
+        let lastTag = this.sql.exec('SELECT last_tag FROM promotion_check_progress WHERE sha = ? AND actor_id = ?', row.sha, actorId).toArray()[0]?.last_tag ?? '';
         let tagged = false;
-        for (const e of evidence) {
-          const target = await (this.deps.promotionTagTarget ?? promotionTagTarget)(this.meta('full_name'), e.tag, await this.token(), this.fetcher);
+        for (;;) {
+          // Keyset pagination bounds both materialization and lookup work. Only completed
+          // negative lookups advance the cursor; a deferred tag chain retries next alarm.
+          const e = this.sql.exec('SELECT tag FROM verified_promote_tags WHERE sha = ? AND actor_id = ? AND tag > ? ORDER BY tag LIMIT 1', row.sha, actorId, lastTag).toArray()[0];
+          if (!e) break;
+          const target = await (this.deps.promotionTagTarget ?? promotionTagTarget)(this.meta('full_name'), e.tag, await this.token(budget), this.fetcher, budget);
           if (target === row.sha) { tagged = true; break; }
+          lastTag = e.tag;
+          this.sql.exec('INSERT INTO promotion_check_progress (sha, actor_id, last_tag) VALUES (?, ?, ?) ON CONFLICT(sha, actor_id) DO UPDATE SET last_tag = excluded.last_tag', row.sha, actorId, lastTag);
         }
         const t = this.now();
         this.storage.transactionSync(() => {
           const current = this.sql.exec('SELECT status FROM promotions WHERE sha = ?', row.sha).toArray()[0];
+          this.sql.exec('DELETE FROM promotion_check_progress WHERE sha = ?', row.sha);
           if (current?.status !== 'pending') return; // cleared by a create event meanwhile
           if (tagged) { this.sql.exec("UPDATE promotions SET status = 'satisfied', resolved_by = 'api', resolved_at = ? WHERE sha = ?", this.iso(t), row.sha); return; }
           this.sql.exec("UPDATE promotions SET status = 'flagged', resolved_by = 'api', resolved_at = ? WHERE sha = ?", this.iso(t), row.sha);
           this.recordFinding({ kind: 'main_commit_missing_promotion_tag', ref: 'refs/heads/main', sha: row.sha, entry_seq: row.entry_seq, delivery_id: row.delivery_id, detail: { due_at: this.iso(row.due_at) } }, t);
         });
       } catch (error) {
+        if (error?.code === 'deferred') return;
         const attempts = row.attempts + 1, code = errorCode(error);
         this.sql.exec('UPDATE promotions SET attempts = ?, next_check_at = ?, last_error = ? WHERE sha = ?', attempts, this.now() + RETRY_MS, code, row.sha);
         log('warning', 'promotion_check_retry', { repo_id: this.repoId(), sha: row.sha, attempts, error: code });

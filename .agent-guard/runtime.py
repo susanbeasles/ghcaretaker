@@ -43,6 +43,50 @@ def protected_install(path):
     return path
 
 
+def output_patterns():
+    """Patterns are installed with the trusted runtime, never read from the checkout."""
+    try:
+        path = protected_install(Path(__file__).with_name("patterns.json"))
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 1024 * 1024:
+            raise Refused("invalid trusted output policy")
+        rules = json.loads(path.read_text())["patterns"]
+        if not isinstance(rules, list) or not rules:
+            raise Refused("missing trusted output policy")
+        compiled = []
+        for rule in rules:
+            flags = re.I
+            for flag in rule.get("flags", ""):
+                if flag not in "ms":
+                    raise Refused("invalid trusted output policy")
+                flags |= re.M if flag == "m" else re.S
+            compiled.append(re.compile(rule["rx"], flags))
+        return compiled
+    except (OSError, KeyError, TypeError, ValueError, re.error) as error:
+        raise Refused("trusted output policy unavailable") from error
+
+
+def checked_output(value):
+    """Quarantine matched output before it reaches any client; emit no matched snippets."""
+    patterns = output_patterns()
+    remaining = MAX_OUTPUT
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str):
+            remaining -= len(item.encode("utf-8"))
+            if remaining < 0:
+                raise Refused("output size limit exceeded")
+            if any(pattern.search(item) for pattern in patterns):
+                raise Refused("output quarantined by trusted content policy")
+        elif isinstance(item, dict):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            pending.extend(item)
+    return value
+
+
 def matches(name, patterns):
     # Match both an object and the subtree selected by directory/** policies.
     return any(fnmatch.fnmatchcase(name, p) or fnmatch.fnmatchcase(name, p.replace("**/", ""))
@@ -330,6 +374,7 @@ def registration(root):
     for key in ("secret_paths", "quarantine_paths", "protected_write_paths"):
         if not isinstance(item["policy"].get(key), list):
             raise Refused("invalid registered policy")
+    output_patterns()  # Missing/invalid trusted scanning prevents startup.
     return canonical, item
 
 
@@ -508,11 +553,11 @@ def serve_session(root, config, baseline):
                     value = write_file(root, name, contents, args["expected_sha256"], config["policy"])
                     total += size - sizes.get(name, 0)
                     sizes[name] = size
-                response["result"] = {"content": [{"type": "text", "text": json.dumps(value)}]}
+                response["result"] = {"content": [{"type": "text", "text": json.dumps(checked_output(value))}]}
             else:
                 response["error"] = {"code": -32601, "message": "unsupported method"}
         except (Refused, OSError, KeyError, TypeError, ValueError, subprocess.SubprocessError) as error:
-            response["result"] = {"isError": True, "content": [{"type": "text", "text": str(error)}]}
+            response["result"] = {"isError": True, "content": [{"type": "text", "text": "Broker operation refused; trusted validation did not pass"}]}
         print(json.dumps(response), flush=True)
 
 
@@ -526,7 +571,7 @@ def main():
         if args.operation == "preflight":
             code, output = execute(root, config["policy"], config["image"],
                                    "/usr/bin/python3 -I -c 'import os; assert os.getuid() == 65534'", timeout=30)
-            sys.stdout.write(output)
+            sys.stdout.write(checked_output(output))
             return code
         if args.operation == "serve":
             serve(root, config)
@@ -547,10 +592,10 @@ def main():
             command = args.argument
         code, output = execute(root, config["policy"], config["image"], command,
                                stdin=sys.stdin.read(MAX_OUTPUT + 1), timeout=600, check=args.operation == "check")
-        sys.stdout.write(output)
+        sys.stdout.write(checked_output(output))
         return code
     except (Refused, OSError, KeyError, ValueError, subprocess.SubprocessError) as error:
-        sys.stderr.write("agent-guard: isolated execution refused: " + str(error) + "\n")
+        sys.stderr.write("agent-guard: isolated execution refused; trusted validation did not pass\n")
         return 2
 
 

@@ -238,3 +238,61 @@ test('transient promotion lookup preserves ordered retry then recovers',async()=
  await core.ingest(create(promoTag(2)));await core.ingest(push());await core.alarm();assert.equal(core.storage.sql.exec('SELECT COUNT(*) AS n FROM inbox').toArray()[0].n,2);
  now.advance(3600000);await core.alarm();assert.equal(core.storage.sql.exec('SELECT COUNT(*) AS n FROM inbox').toArray()[0].n,0);assert.equal(core.head().promotions_pending,0);
 });
+
+test('verified promotion lookup uses a SHA and actor index',()=>{
+ const {core}=setup();
+ const plan=core.sql.exec('EXPLAIN QUERY PLAN SELECT tag FROM verified_promote_tags WHERE sha = ? AND actor_id = ? LIMIT 1',sha(2),99).toArray();
+ assert.ok(plan.some(r=>/USING (?:COVERING )?INDEX verified_promote_tags_sha_actor/.test(r.detail)),JSON.stringify(plan));
+ const seek=core.sql.exec('EXPLAIN QUERY PLAN SELECT tag FROM verified_promote_tags WHERE sha = ? AND actor_id = ? AND tag > ? ORDER BY tag LIMIT 1',sha(2),99,'').toArray();
+ assert.ok(seek.some(r=>r.detail.includes('USING COVERING INDEX verified_promote_tags_sha_actor_tag')),JSON.stringify(seek));
+ assert.ok(seek.every(r=>!r.detail.includes('TEMP B-TREE')),JSON.stringify(seek));
+});
+
+test('promotion create deferral preserves ordered inbox even past terminal retry age',async()=>{
+ const {core,now}=setup();let calls=0,mints=0;
+ delete core.deps.promotionTagTarget;
+ core.deps.mintToken=async()=>{mints++;return {token:'synthetic',expires_at:now()+3600000};};
+ core.fetcher=async()=>Response.json({object:++calls%2?{type:'tag',sha:sha(500)}:{type:'commit',sha:sha(2)}});
+ await core.ingest(create(promoTag(2)));await core.ingest(create('ordinary-branch',{ref_type:'branch'}));
+ core.sql.exec('UPDATE inbox SET attempts = 11, queued_at = ?',now()-25*3600000);
+ await core.processInbox({api:0});assert.equal(mints,0);assert.equal(calls,0);
+ const budget={api:2};await core.processInbox(budget);
+ assert.equal(mints,1);assert.equal(calls,1);assert.equal(budget.api,0);
+ const pending=core.sql.exec('SELECT attempts, last_error FROM inbox ORDER BY id').toArray();
+ assert.equal(pending.length,2);assert.equal(pending[0].attempts,11);assert.equal(pending[0].last_error,null);
+ calls=0;await core.processInbox({api:2});
+ assert.equal(mints,1,'cached token costs no request');assert.equal(calls,2);
+ assert.equal(core.sql.exec('SELECT COUNT(*) AS n FROM inbox').one().n,0);
+ assert.equal(core.sql.exec('SELECT COUNT(*) AS n FROM verified_promote_tags').one().n,1);
+});
+
+test('promotion checks share dereference budget and defer without retry penalties or false findings',async()=>{
+ const {core,now}=setup();await core.ingest(push());await core.processInbox({api:40});
+ core.sql.exec('INSERT INTO verified_promote_tags (tag,sha,actor_id,delivery_id) VALUES (?,?,?,?)',promoTag(2),sha(2),99,crypto.randomUUID());
+ now.advance(16*60000);delete core.deps.promotionTagTarget;let calls=0;
+ core.fetcher=async()=>Response.json({object:++calls%2?{type:'tag',sha:sha(500)}:{type:'commit',sha:sha(2)}});
+ const budget={api:1};await core.checkPromotions(budget);
+ assert.equal(calls,1);assert.equal(budget.api,0);
+ const row=core.sql.exec('SELECT status,attempts,last_error FROM promotions WHERE sha = ?',sha(2)).one();
+ assert.deepEqual(row,{status:'pending',attempts:0,last_error:null});assert.deepEqual(kinds(core),[]);
+ calls=0;await core.checkPromotions({api:2});
+ assert.equal(core.sql.exec('SELECT status FROM promotions WHERE sha = ?',sha(2)).one().status,'satisfied');
+});
+
+for (const validLast of [true,false]) test('promotion evidence resumes beyond one alarm budget; valid last='+validLast,async()=>{
+ const {core,now}=setup();await core.ingest(push());await core.processInbox({api:40});
+ const refs=Array.from({length:46},(_,i)=>promoTag(2,100+i));
+ for(const ref of refs)core.sql.exec('INSERT INTO verified_promote_tags (tag,sha,actor_id,delivery_id) VALUES (?,?,?,?)',ref,sha(2),99,crypto.randomUUID());
+ now.advance(16*60000);delete core.deps.promotionTagTarget;const seen=[];
+ core.fetcher=async url=>{seen.push(url);return Response.json({object:{type:'commit',sha:validLast&&url.endsWith(refs.at(-1))?sha(2):sha(3)}});};
+ await core.checkPromotions({api:40});assert.equal(seen.length,40);
+ assert.equal(core.sql.exec('SELECT status FROM promotions').one().status,'pending');
+ assert.equal(core.sql.exec('SELECT last_tag FROM promotion_check_progress').one().last_tag,refs[39]);
+ const resumed=new CommitLedgerCore(core.storage,core.env,{...core.deps,fetcher:core.fetcher});
+ await resumed.checkPromotions({api:40});
+ assert.equal(core.sql.exec('SELECT status FROM promotions').one().status,validLast?'satisfied':'flagged');
+ assert.equal(seen.length,46);assert.equal(new Set(seen).size,46,'completed lookups are not repeated');
+ assert.equal(core.sql.exec('SELECT COUNT(*) AS n FROM promotion_check_progress').one().n,0);
+ assert.equal(core.sql.exec('SELECT attempts FROM promotions').one().attempts,0);
+ assert.deepEqual(kinds(core),validLast?[]:['main_commit_missing_promotion_tag']);
+});

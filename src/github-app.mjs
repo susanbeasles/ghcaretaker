@@ -116,8 +116,9 @@ export async function commitDetails(fullName, sha, token, fetcher = fetch) {
 }
 
 // Resolve a promotion ref to its exact full commit, including bounded annotated-tag chains.
-export async function promotionTagTarget(fullName, ref, token, fetcher = fetch) {
+export async function promotionTagTarget(fullName, ref, token, fetcher = fetch, budget = null) {
   if (!/^promote\/pr-[1-9]\d{0,9}-[0-9a-f]{12}$/.test(ref ?? '')) return null;
+  spend(budget);
   let object = (await githubRequest('/repos/' + repoPath(fullName) + '/git/ref/tags/' + ref, { token, fetcher })).data?.object;
   const seen = new Set();
   for (let i = 0; i < 8; i++) {
@@ -125,6 +126,7 @@ export async function promotionTagTarget(fullName, ref, token, fetcher = fetch) 
     if (object.type === 'commit') return object.sha;
     if (object.type !== 'tag' || seen.has(object.sha)) return null;
     seen.add(object.sha);
+    spend(budget);
     object = (await githubRequest('/repos/' + repoPath(fullName) + '/git/tags/' + object.sha, { token, fetcher })).data?.object;
   }
   return null;

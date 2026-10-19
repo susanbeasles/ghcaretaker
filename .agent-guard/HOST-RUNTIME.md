@@ -8,7 +8,8 @@ there is no fallback to repository scripts on the host.
 ## Required installation boundary
 
 An administrator must review and install the release's `runtime.py` as
-`/opt/agent-guard/lib/runtime.py`, `host/bin/agent-guard` as
+`/opt/agent-guard/lib/runtime.py`, the reviewed `patterns.json` alongside it as
+`/opt/agent-guard/lib/patterns.json`, `host/bin/agent-guard` as
 `/opt/agent-guard/bin/agent-guard`, and the two `host/git-hooks/` scripts in
 `/opt/agent-guard/git-hooks/`. Executables require mode 0755. All installed files,
 the registry and every ancestor must be owned by root, not group/world writable,
@@ -116,3 +117,15 @@ changes, links, stale source and failed checks cannot export formatting edits.
 denied network/mount/secret access, normal writes and loopback services, formatter
 export and failure-without-fallback against real runsc. These are runtime/MCP
 protocol tests, not claims of qualification for a vendor's complete client.
+
+## Output quarantine
+
+Before returning broker reads, command output or exported source proposals, the
+installed runtime scans all string fields and keys against its installed pattern
+policy. Matched content is withheld with a generic refusal, never echoed as a
+warning snippet. Responses are bounded to 2 MiB of string content. Missing or
+invalid trusted patterns refuse startup/output; checkout-local patterns are never
+loaded by the broker. This heuristic is additional defense, not proof that text
+is trustworthy; clients must still treat all returned source as untrusted data.
+The reviewed policy file needs separate operator installation and production
+qualification together with the runtime. This source change installs nothing.

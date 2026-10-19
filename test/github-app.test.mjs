@@ -73,3 +73,15 @@ test('promotion targets resolve exact refs and nested annotated tags, refusing l
  assert.equal(await promotionTagTarget('susanbeasles/demo',ref,'tok',async()=>Response.json({object:{type:'tag',sha:tag}})),null);
  assert.equal(await promotionTagTarget('susanbeasles/demo',ref,'tok',async()=>Response.json({object:{type:'commit',sha:sha(6)}})),sha(6),'full target returned; core must compare exact expected SHA');
 });
+
+test('promotion target charges each request and defers before the next annotated tag fetch', async () => {
+ const target=sha(5), ref='promote/pr-7-'+target.slice(0,12), budget={api:2};let calls=0;
+ const fetcher=async()=>Response.json({object:++calls<3?{type:'tag',sha:sha(500+calls)}:{type:'commit',sha:target}});
+ await assert.rejects(promotionTagTarget('susanbeasles/demo',ref,'tok',fetcher,budget),{code:'deferred'});
+ assert.equal(calls,2);assert.equal(budget.api,0);
+ await assert.rejects(promotionTagTarget('susanbeasles/demo',ref,'tok',fetcher,budget),{code:'deferred'});
+ assert.equal(calls,2);
+ const fresh={api:3};calls=0;
+ assert.equal(await promotionTagTarget('susanbeasles/demo',ref,'tok',fetcher,fresh),target);
+ assert.equal(calls,3);assert.equal(fresh.api,0);
+});
