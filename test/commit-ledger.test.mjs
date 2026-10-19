@@ -296,3 +296,63 @@ for (const validLast of [true,false]) test('promotion evidence resumes beyond on
  assert.equal(core.sql.exec('SELECT attempts FROM promotions').one().attempts,0);
  assert.deepEqual(kinds(core),validLast?[]:['main_commit_missing_promotion_tag']);
 });
+
+const PROMOTION_MIGRATION = 'migration:exact-promotion-evidence:v1';
+
+test('upgrade reopens legacy satisfied provenance once without rewriting ledger history',async()=>{
+ const {core,storage,now}=setup();
+ await core.ingest(push({after:sha(3),commits:[sha(2),sha(3)]}));await core.processInbox({api:40});
+ for(const [n,source] of [[2,'create_event:'+promoTag(2)],[3,'api']]) {
+  core.sql.exec("UPDATE promotions SET status = 'satisfied', resolved_by = ?, resolved_at = ?, attempts = 7, last_error = 'old', next_check_at = ? WHERE sha = ?",source,core.iso(now()),now()+86400000,sha(n));
+ }
+ core.sql.exec('INSERT INTO promote_tags (tag,prefix,delivery_id,seen_at) VALUES (?,?,?,?)',promoTag(2),sha(2).slice(0,12),crypto.randomUUID(),core.iso(now()));
+ core.sql.exec('INSERT INTO verified_promote_tags (tag,sha,actor_id,delivery_id) VALUES (?,?,?,?)',promoTag(3),sha(3),99,crypto.randomUUID());
+ core.sql.exec('INSERT INTO promotion_check_progress (sha,actor_id,last_tag) VALUES (?,?,?)',sha(3),99,'z');
+ core.sql.exec('DELETE FROM meta WHERE key = ?',PROMOTION_MIGRATION);
+ const entries=core.sql.exec('SELECT * FROM entries ORDER BY seq').toArray(), tags=core.sql.exec('SELECT * FROM promote_tags').toArray();
+ now.advance(16*60000);
+ const upgraded=new CommitLedgerCore(storage,core.env,core.deps);
+ const reopened=core.sql.exec('SELECT status,resolved_by,resolved_at,attempts,last_error,next_check_at,due_at FROM promotions').toArray();
+ assert.equal(reopened.length,2);
+ for(const row of reopened) {
+  assert.equal(row.status,'pending');assert.equal(row.resolved_by,null);assert.equal(row.resolved_at,null);
+  assert.equal(row.attempts,0);assert.equal(row.last_error,null);assert.equal(row.next_check_at,now());assert.ok(row.due_at<now());
+ }
+ assert.equal(core.sql.exec('SELECT COUNT(*) AS n FROM promotion_check_progress').one().n,0);
+ assert.deepEqual(core.sql.exec('SELECT * FROM entries ORDER BY seq').toArray(),entries);
+ assert.deepEqual(core.sql.exec('SELECT * FROM promote_tags').toArray(),tags);
+ await storage.deleteAlarm();await upgraded.initialize();assert.equal(storage.alarmAt,now()+1000);
+ await upgraded.checkPromotions({api:40});
+ assert.equal(core.sql.exec('SELECT status FROM promotions WHERE sha = ?',sha(2)).one().status,'flagged');
+ assert.equal(core.sql.exec('SELECT status FROM promotions WHERE sha = ?',sha(3)).one().status,'satisfied');
+ const settled=core.sql.exec('SELECT * FROM promotions ORDER BY sha').toArray();
+ new CommitLedgerCore(storage,core.env,core.deps);
+ assert.deepEqual(core.sql.exec('SELECT * FROM promotions ORDER BY sha').toArray(),settled);
+ assert.deepEqual(core.sql.exec('SELECT * FROM entries ORDER BY seq').toArray(),entries);
+});
+
+test('fresh verified states survive reopening and migrated work respects grace and batch bounds',async()=>{
+ const {core,storage,now}=setup();await core.ingest(create(promoTag(2)));await core.ingest(push());await core.processInbox({api:40});
+ const verified=core.sql.exec('SELECT * FROM promotions').one();
+ assert.equal(verified.status,'satisfied');new CommitLedgerCore(storage,core.env,core.deps);
+ assert.deepEqual(core.sql.exec('SELECT * FROM promotions').one(),verified);
+ for(let i=3;i<15;i++)core.sql.exec("INSERT INTO promotions (sha,delivery_id,due_at,next_check_at,status,resolved_by) VALUES (?,?,?,?,'satisfied','api')",sha(i),crypto.randomUUID(),now()+60000,now()+60000);
+ core.sql.exec('DELETE FROM meta WHERE key = ?',PROMOTION_MIGRATION);
+ const upgraded=new CommitLedgerCore(storage,core.env,core.deps);
+ await upgraded.checkPromotions({api:40});assert.equal(core.sql.exec("SELECT COUNT(*) AS n FROM promotions WHERE status = 'pending'").one().n,13);
+ now.advance(16*60000);await upgraded.checkPromotions({api:40});
+ assert.equal(core.sql.exec("SELECT COUNT(*) AS n FROM promotions WHERE status = 'pending'").one().n,3);
+ await upgraded.checkPromotions({api:40});assert.equal(core.sql.exec("SELECT COUNT(*) AS n FROM promotions WHERE status = 'pending'").one().n,0);
+});
+
+test('promotion migration marker and invalidation roll back together on failure',async()=>{
+ const {core,storage}=setup();await core.ingest(push());await core.processInbox({api:40});
+ core.sql.exec("UPDATE promotions SET status = 'satisfied', resolved_by = 'api'");
+ core.sql.exec('DELETE FROM meta WHERE key = ?',PROMOTION_MIGRATION);
+ const original=storage.sql.exec;
+ storage.sql.exec=(query,...args)=>{if(query.startsWith('INSERT INTO meta')&&args[0]===PROMOTION_MIGRATION)throw Error('synthetic migration write failure');return original(query,...args);};
+ assert.throws(()=>new CommitLedgerCore(storage,core.env,core.deps),/synthetic migration write failure/);
+ storage.sql.exec=original;
+ assert.equal(core.sql.exec('SELECT status FROM promotions').one().status,'satisfied');assert.equal(core.meta(PROMOTION_MIGRATION),null);
+ new CommitLedgerCore(storage,core.env,core.deps);assert.equal(core.sql.exec('SELECT status FROM promotions').one().status,'pending');
+});

@@ -78,7 +78,21 @@ export class CommitLedgerCore {
     this.storage = storage; this.sql = storage.sql; this.env = env; this.deps = deps;
     this.now = deps.now || Date.now; this.fetcher = deps.fetcher || fetch; this.lock = mutex(); this.cachedToken = null;
     for (const statement of SCHEMA) this.sql.exec(statement);
+    this.storage.transactionSync(() => {
+      const marker = 'migration:exact-promotion-evidence:v1';
+      if (this.meta(marker) !== null) return;
+      // Legacy create_event and api resolutions both accepted prefix-only evidence.
+      // Recheck every pre-marker satisfied row; never infer trust from resolved_by.
+      // Keep the append-only ledger, findings, and original grace deadline intact.
+      this.sql.exec("DELETE FROM promotion_check_progress WHERE sha IN (SELECT sha FROM promotions WHERE status = 'satisfied')");
+      this.sql.exec("UPDATE promotions SET status = 'pending', resolved_by = NULL, resolved_at = NULL, attempts = 0, last_error = NULL, next_check_at = ? WHERE status = 'satisfied'", this.now());
+      this.setMeta(marker, this.iso(this.now()));
+    });
   }
+
+  // Awaited by the Durable Object initialization gate, including after an alarm-write
+  // failure: the migration marker does not imply pending work has been scheduled.
+  async initialize() { await this.schedule({ api: API_BUDGET }); }
 
   meta(key) { return this.sql.exec('SELECT value FROM meta WHERE key = ?', key).toArray()[0]?.value ?? null; }
   setMeta(key, value) { this.sql.exec('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, String(value)); }

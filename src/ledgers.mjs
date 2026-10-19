@@ -23,7 +23,11 @@ export class EventLedger extends DurableObject {
 }
 
 export class CommitLedger extends DurableObject {
-  constructor(ctx, env) { super(ctx, env); this.core = new CommitLedgerCore(ctx.storage, env); }
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.core = new CommitLedgerCore(ctx.storage, env);
+    ctx.blockConcurrencyWhile(() => this.core.initialize());
+  }
   fetch() { return notFound(); }
   ingest(item) { return this.core.ingest(item); }
   head() { return this.core.head(); }
