@@ -25,7 +25,7 @@ function fixture(run: (call: (script: string, data: Input | string) => ReturnTyp
 }
 
 for (const [tool, input, status] of [
-  ['Bash', { command: 'git status --short' }, 0],
+  ['Bash', { command: 'git status --short' }, 2],
   ['Read', { file_path: 'src/index.ts' }, 0],
   ['Read', { file_path: '.env' }, 2],
   ['Read', { file_path: 'node_modules/package/README.md' }, 2],
@@ -35,7 +35,7 @@ for (const [tool, input, status] of [
   ['Bash', { command: 'printf x >> .codex/config.toml' }, 2],
   ['Bash', { command: 'printf x > .guard/hooks/session-start.py' }, 2],
   ['Bash', { command: 'touch .github/workflows/unsafe.yml' }, 2],
-  ['Bash', { command: 'printf x > src/example.ts' }, 0],
+  ['Bash', { command: 'printf x > src/example.ts' }, 2],
   ['mcp__unknown__read', {}, 2],
 ] as const) {
   test(`guard ${tool} ${JSON.stringify(input)} returns ${status}`, () => fixture(call => {
@@ -49,9 +49,9 @@ test('Copilot aliases enforce protected writes', () => fixture(call => {
   assert.equal(result.status, 2, String(result.stderr));
 }));
 
-test('supervisor allows benign status', () => fixture(call => {
+test('supervisor requires confinement even for benign status', () => fixture(call => {
   const result = call('supervisor.py', { tool_name: 'Bash', tool_input: { command: 'git status --short' } });
-  assert.equal(result.status, 0, String(result.stderr));
+  assert.equal(result.status, 2, String(result.stderr));
 }));
 
 test('supervisor HALT blocks the next benign call', () => fixture((call, dir) => {

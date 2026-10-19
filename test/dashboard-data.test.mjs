@@ -12,7 +12,7 @@ import { CommitLedgerCore } from '../src/commit-ledger-core.mjs';
 import { metricsCollector } from '../src/metrics.mjs';
 import { accessKit, d1Database, sqlStorage, memoryR2, clock, namespace, secret, sha } from './fakes.mjs';
 
-const MIGRATION = readFileSync(new URL('../migrations-observatory/0001_metrics.sql', import.meta.url), 'utf8');
+const MIGRATION = ['0001_metrics.sql', '0002_reported_telemetry.sql'].map(name => readFileSync(new URL('../migrations-observatory/' + name, import.meta.url), 'utf8')).join('\n');
 beforeEach(() => _resetAccessCache());
 
 test('nearest-rank percentiles; empty is null', () => {
@@ -74,7 +74,7 @@ async function world() {
   db.prepare(`INSERT INTO runs (repo_id, run_id, attempt, workflow_name, status, conclusion, created_at, run_started_at, updated_at, billable_ms, billable_json, billable_kind)
     VALUES (42, 1, 1, '<b>wf</b>', 'completed', 'success', '2026-10-15T11:00:00.000Z', '2026-10-15T11:00:00.000Z', '2026-10-15T11:04:00.000Z', 240000, '{}', 'reported')`).run();
   db.prepare(`INSERT INTO jobs (job_id, run_id, attempt, repo_id, name, workflow_name, status, labels, runner_group, queued_at, started_at, completed_at, conclusion, telemetry, telemetry_kind)
-    VALUES (9, 1, 1, 42, 'build', '<b>wf</b>', 'completed', '[]', 'GitHub Actions', '2026-10-15T11:00:01.000Z', '2026-10-15T11:00:11.000Z', '2026-10-15T11:03:50.000Z', 'success', ?, 'measured')`)
+    VALUES (9, 1, 1, 42, 'build', '<b>wf</b>', 'completed', '[]', 'GitHub Actions', '2026-10-15T11:00:01.000Z', '2026-10-15T11:00:11.000Z', '2026-10-15T11:03:50.000Z', 'success', ?, 'reported')`)
     .run(JSON.stringify({ cpu_mean: 0.4, cpu_p95: 0.9, memory_used_max_bytes: 5_000_000_000 }));
   // One event so the ledger head is non-empty (begin/commit are the ingress path).
   const delivery_id = crypto.randomUUID(), body_sha256 = 'a'.repeat(64), r = events.begin({ delivery_id, body_sha256 });
@@ -101,7 +101,7 @@ test('routes with a valid assertion: HTML pages, JSON twins with provenance, sec
   assert.equal(overview.runs_24h.estimated_minutes.value, null, 'reported runs are never estimated');
   assert.equal(overview.backup.summary.repositories, 3); assert.ok(overview.provenance.estimated);
   const actions = await (await get('/api/actions?days=7')).json();
-  assert.equal(actions.by_job[0].cpu_mean.kind, 'measured'); assert.equal(actions.by_job[0].cpu_mean.value, 0.4);
+  assert.equal(actions.by_job[0].cpu_mean.kind, 'reported'); assert.equal(actions.by_job[0].cpu_mean.value, 0.4);
   assert.equal(actions.by_job[0].memory_peak.value, 5_000_000_000); assert.equal(actions.by_workflow[0].workflow, '<b>wf</b>', 'JSON keeps the raw value (served as application/json, nosniff)');
   assert.equal(actions.total.queue_p95.value, 10_000);
   const events = await (await get('/api/events?limit=1')).json();
@@ -126,7 +126,7 @@ test('bad parameters are 400, unknown paths 404, never a redirect', async () => 
   }
 });
 
-test('collector output feeds the dashboard: telemetry figures are measured, an absent timing is missing', async () => {
+test('collector output feeds the dashboard: telemetry figures are reported, an absent timing is missing', async () => {
   const { env, get } = await world();
   env.METRICS_DB.db.exec('DELETE FROM runs; DELETE FROM jobs');
   const collector = metricsCollector(env, { readDelivery: async (_e, _k, _s) => current, mintToken: async () => { const e = new Error('x'); e.code = 'app_unconfigured'; throw e; } });
@@ -136,4 +136,13 @@ test('collector output feeds the dashboard: telemetry figures are measured, an a
   await deliver({ action: 'completed', repository, installation: { id: 1 }, workflow_run: { id: 5, run_attempt: 1, name: 'ci', status: 'completed', conclusion: 'success', created_at: '2026-10-15T11:00:00Z', run_started_at: '2026-10-15T11:00:00Z', updated_at: '2026-10-15T11:02:00Z' } });
   const t = await (await get('/api/actions')).json();
   assert.equal(t.total.runs.value, 1); assert.equal(t.total.billable_minutes.value, null); assert.equal(t.total.cpu_mean.value, null);
+});
+
+test('new and legacy job-log claims have only reported provenance in dashboard aggregates', () => {
+  for (const telemetry_kind of ['reported', 'measured']) {
+    const summary = summarize([], [{ telemetry_kind, cpu_mean: 0.99, cpu_p95: 1, mem_peak: 100 }]);
+    for (const key of ['telemetry_jobs', 'cpu_mean', 'cpu_p95', 'memory_peak']) assert.equal(summary[key].kind, 'reported', key);
+    assert.equal(summary.telemetry_jobs.value, 1);
+    assert.equal(summary.cpu_mean.value, 0.99);
+  }
 });

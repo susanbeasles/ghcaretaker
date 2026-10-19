@@ -30,8 +30,8 @@ export const jobQueue = j => (j.started_at && j.conclusion !== 'skipped' ? span(
 export const jobDuration = j => (j.status === 'completed' && j.conclusion !== 'skipped' ? span(j.started_at, j.completed_at) : null);
 
 // Provenance of every figure (never mixed within one figure):
-//   measured  - GitHub event timestamps and conclusions, and runner-telemetry samples from /proc (and statistics over them)
-//   reported  - GitHub API billing values (GET .../runs/{id}/timing), summed in the API's own unit
+//   measured  - GitHub event timestamps and conclusions (and statistics over them)
+//   reported  - GitHub API billing values in the API's unit; untrusted job-log telemetry claims
 //   estimated - derived stand-ins for something not observed; computed at read time, never stored
 // A figure is {value, kind, unit, n?}; value null means missing (no data), which is never shown as zero.
 export const fig = (value, kind, unit, extra = {}) => ({ value: value === undefined || (typeof value === 'number' && !Number.isFinite(value)) ? null : value, kind, unit, ...extra });
@@ -39,8 +39,8 @@ export const HOSTED_RUNNER_GROUP = 'GitHub Actions';
 export const ESTIMATE_BASIS = 'sum over completed jobs on GitHub-hosted runners of the job duration rounded up to whole minutes; only runs with no reported billing; no runner-type multiplier';
 
 export const PROVENANCE = Object.freeze({
-  measured: 'GitHub event timestamps and conclusions; runner-telemetry samples from /proc on the runner',
-  reported: 'GitHub API billing values, in the API unit (milliseconds), shown as minutes',
+  measured: 'GitHub event timestamps and conclusions',
+  reported: 'GitHub API billing values (milliseconds shown as minutes); untrusted job-log telemetry claims, not authenticated runner measurements',
   estimated: 'derived when nothing was reported; never stored, never summed with reported values',
 });
 
@@ -54,7 +54,9 @@ export function summarize(runs, jobs) {
   const durations = runs.map(runDuration).filter(v => v !== null);
   const jobDurations = jobs.map(jobDuration).filter(v => v !== null);
   const queues = jobs.map(jobQueue).filter(v => v !== null);
-  const tele = jobs.filter(j => j.telemetry_kind === 'measured');
+  // Older databases labelled these same unauthenticated job-log claims measured.
+  // Downgrade those rows at read time too, even before the provenance migration runs.
+  const tele = jobs.filter(j => j.telemetry_kind === 'reported' || j.telemetry_kind === 'measured');
   const cpuMeans = tele.map(j => j.cpu_mean).filter(Number.isFinite), cpuP95s = tele.map(j => j.cpu_p95).filter(Number.isFinite), memPeaks = tele.map(j => j.mem_peak).filter(Number.isFinite);
   const jobsDecided = jobs.filter(j => j.status === 'completed' && DECIDED.has(j.conclusion)), jobFailures = jobsDecided.filter(j => FAILED.has(j.conclusion)).length;
   // Estimate: only for completed runs without reported billing, from their hosted-runner jobs present in `jobs`.
@@ -76,10 +78,10 @@ export function summarize(runs, jobs) {
     queue_p95: fig(percentile(queues, 95), 'measured', 'ms', { n: queues.length }),
     billable_minutes: fig(billed.length ? billed.reduce((a, r) => a + r.billable_ms, 0) / 60_000 : null, 'reported', 'min', { n: billed.length, source: 'GET /repos/{r}/actions/runs/{id}/timing (billable total_ms)' }),
     estimated_minutes: fig(estimatedRuns ? estimate : null, 'estimated', 'min', { n: estimatedRuns, basis: ESTIMATE_BASIS }),
-    telemetry_jobs: fig(tele.length, 'measured', 'count'),
-    cpu_mean: fig(cpuMeans.length ? mean(cpuMeans) : null, 'measured', 'fraction', { n: cpuMeans.length }),
-    cpu_p95: fig(percentile(cpuP95s, 95), 'measured', 'fraction', { n: cpuP95s.length }),
-    memory_peak: fig(memPeaks.length ? Math.max(...memPeaks) : null, 'measured', 'bytes', { n: memPeaks.length }),
+    telemetry_jobs: fig(tele.length, 'reported', 'count'),
+    cpu_mean: fig(cpuMeans.length ? mean(cpuMeans) : null, 'reported', 'fraction', { n: cpuMeans.length }),
+    cpu_p95: fig(percentile(cpuP95s, 95), 'reported', 'fraction', { n: cpuP95s.length }),
+    memory_peak: fig(memPeaks.length ? Math.max(...memPeaks) : null, 'reported', 'bytes', { n: memPeaks.length }),
   };
 }
 

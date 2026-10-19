@@ -1,7 +1,20 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import {rulesets} from '../scripts/rulesets.mjs';
 import {check,config} from '../scripts/check-config.mjs';
+test('all tags require creation authorization and remain immutable without new bypass actors',()=>{
+ const generated=rulesets(42).find(r=>r.target==='tag');
+ const checked=JSON.parse(fs.readFileSync(new URL('../config/rulesets/ghcaretaker-all-tags-integrity.json',import.meta.url),'utf8'));
+ for(const tags of [generated,checked]){
+  assert.equal(tags.enforcement,'active');
+  assert.deepEqual(tags.conditions,{ref_name:{include:['~ALL'],exclude:[]}});
+  assert.deepEqual(tags.bypass_actors,[]);
+  assert.deepEqual(tags.rules.map(r=>r.type),['creation','update','deletion','non_fast_forward']);
+  assert.deepEqual(tags.rules.find(r=>r.type==='update').parameters,{update_allows_fetch_and_merge:false});
+ }
+ assert.deepEqual(generated,checked);
+});
 test('owner exemption never weakens separate main/signature/tag rules',()=>{
  const rs=rulesets(42),main=rs.find(r=>r.name==='ghcaretaker-main-integrity'),review=rs.find(r=>r.name==='ghcaretaker-main-review'),tags=rs.find(r=>r.target==='tag');
  assert.deepEqual(main.bypass_actors,[]);assert.deepEqual(tags.bypass_actors,[]);

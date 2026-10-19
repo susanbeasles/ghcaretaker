@@ -1,0 +1,38 @@
+# Exact non-credential source expressions only; no file-wide exemptions.
+# Validate with: python3 test/gitleaks-specificity.py /path/to/gitleaks
+[extend]
+useDefault = true
+
+[[rules]]
+id = "private-key"
+
+[[rules.allowlists]]
+description = "Exact non-credential source expression; review if expression changes"
+condition = "AND"
+regexTarget = "line"
+paths = ["^src/vault\\-core\\.mjs$"]
+regexes = ["(?m)^\\ return\\ '\\-\\-\\-\\-\\-BEGIN\\ PRIVATE\\ KEY\\-\\-\\-\\-\\-\\\\n'\\+b64\\(wrapped\\)\\.replaceAll\\('\\-','\\+'\\)\\.replaceAll\\('_','/'\\)\\+'\\\\n\\-\\-\\-\\-\\-END\\ PRIVATE\\ KEY\\-\\-\\-\\-\\-';$"]
+
+[[rules.allowlists]]
+description = "Exact non-credential source expression; review if expression changes"
+condition = "AND"
+regexTarget = "line"
+paths = ["^test/fakes\\.mjs$"]
+regexes = ["(?m)^\\ \\ return\\ \\{\\ pem:\\ '\\-\\-\\-\\-\\-BEGIN\\ PRIVATE\\ KEY\\-\\-\\-\\-\\-\\\\n'\\ \\+\\ Buffer\\.from\\(bytes\\)\\.toString\\('base64'\\)\\ \\+\\ '\\\\n\\-\\-\\-\\-\\-END\\ PRIVATE\\ KEY\\-\\-\\-\\-\\-',\\ publicKey:\\ k\\.publicKey\\ \\};$"]
+
+[[rules.allowlists]]
+description = "Exact non-credential source expression; review if expression changes"
+condition = "AND"
+regexTarget = "line"
+paths = ["^test/security\\.test\\.mjs$"]
+regexes = ["(?m)^\\ return\\ \\{\\.\\.\\.e,GITHUB_OWNER:'personal',GITHUB_INSTALLATION_ID:'123',GITHUB_APP_ID:'456',GITHUB_APP_PRIVATE_KEY:'\\-\\-\\-\\-\\-BEGIN\\ PRIVATE\\ KEY\\-\\-\\-\\-\\-\\\\n'\\+btoa\\(String\\.fromCharCode\\(\\.\\.\\.new\\ Uint8Array\\(bytes\\)\\)\\)\\+'\\\\n\\-\\-\\-\\-\\-END\\ PRIVATE\\ KEY\\-\\-\\-\\-\\-'\\};$"]
+
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "Exact non-credential source expression; review if expression changes"
+condition = "AND"
+regexTarget = "line"
+paths = ["^scripts/check\\-config\\.mjs$"]
+regexes = ["(?m)^const\\ SECRETS_STORE='b6504fe2d5f64352954629bc7185fb79';$"]

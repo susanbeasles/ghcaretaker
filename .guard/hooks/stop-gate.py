@@ -1,16 +1,16 @@
-#!/usr/bin/env python3
-"""Stop: run .guard/checks/on-stop; if it fails, send the agent back once. Honors stop_hook_active so it cannot loop.
-This is a convenience, not the gate: CI is the gate."""
-import json, os, subprocess, sys
-try: d = json.load(sys.stdin)
-except Exception: sys.exit(0)
-if d.get("stop_hook_active"): sys.exit(0)
-root = os.environ.get("CLAUDE_PROJECT_DIR") or subprocess.run(["git","rev-parse","--show-toplevel"],capture_output=True,text=True).stdout.strip() or os.getcwd()
-check = os.path.join(root, ".guard", "checks", "on-stop")
-if not os.path.isfile(check):
-    sys.stderr.write("agent-guard: missing required check script\n"); sys.exit(2)
-r = subprocess.run(["bash", check], capture_output=True, text=True, cwd=root, timeout=590)
-if r.returncode != 0:
-    sys.stderr.write("AGENT-GUARD: the completion gate failed. You are not done. Fix the failures below, then stop again.\n"
-                     + "\n".join((r.stdout + r.stderr).splitlines()[-80:]) + "\n")
+#!/usr/bin/python3 -I
+"""Compatibility entrypoint: only the installed host executor may run checks.
+Configure host-managed hooks directly; never load hook code from a mutable tree.
+"""
+import subprocess
+import sys
+
+try:
+    result = subprocess.run(
+        ["/opt/agent-guard/bin/agent-guard", "check", "stop"],
+        input=sys.stdin.buffer.read(2097153), close_fds=True, check=False,
+    )
+    sys.exit(result.returncode)
+except OSError:
+    sys.stderr.write("agent-guard: required isolated host executor is unavailable; checks did not run.\n")
     sys.exit(2)

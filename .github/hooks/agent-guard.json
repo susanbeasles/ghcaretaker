@@ -4,45 +4,32 @@
     "PreToolUse": [
       {
         "type": "command",
-        "matcher": "Bash|Read|Write|Edit|Grep|Glob|WebFetch|WebSearch|mcp__.*",
-        "bash": "python3 \"$(git rev-parse --show-toplevel)/.agent-guard/guard.py\"",
-        "powershell": "python \"$(git rev-parse --show-toplevel)/.agent-guard/guard.py\"",
+        "matcher": "*",
+        "bash": "/opt/agent-guard/bin/agent-guard pretool",
+        "powershell": "/opt/agent-guard/bin/agent-guard pretool",
         "timeoutSec": 15
-      },
-      {
-        "type": "command",
-        "matcher": "Bash|Read|Write|Edit|Grep|Glob|WebFetch|WebSearch|mcp__.*",
-        "bash": "python3 \"$(git rev-parse --show-toplevel)/.agent-guard/supervisor.py\"",
-        "powershell": "python \"$(git rev-parse --show-toplevel)/.agent-guard/supervisor.py\"",
-        "timeoutSec": 20
       }
     ],
     "PostToolUse": [
       {
         "type": "command",
-        "matcher": "Bash|Read|WebFetch|mcp__.*",
-        "bash": "python3 \"$(git rev-parse --show-toplevel)/.agent-guard/guard.py\"",
-        "powershell": "python \"$(git rev-parse --show-toplevel)/.agent-guard/guard.py\"",
+        "matcher": "mcp__agent_guard__write_file",
+        "bash": "/opt/agent-guard/bin/agent-guard check post-edit",
+        "powershell": "/opt/agent-guard/bin/agent-guard check post-edit",
         "timeoutSec": 15
-      },
-      {
-        "type": "command",
-        "matcher": "Write|Edit",
-        "bash": "python3 \"$(git rev-parse --show-toplevel)\"/.guard/hooks/post-edit-check.py",
-        "timeoutSec": 120
       }
     ],
     "Stop": [
       {
         "type": "command",
-        "bash": "python3 \"$(git rev-parse --show-toplevel)\"/.guard/hooks/stop-gate.py",
+        "bash": "/opt/agent-guard/bin/agent-guard check stop",
         "timeoutSec": 600
       }
     ],
     "SessionStart": [
       {
         "type": "command",
-        "bash": "python3 \"$(git rev-parse --show-toplevel)\"/.guard/hooks/session-start.py",
+        "bash": "/opt/agent-guard/bin/agent-guard preflight",
         "timeoutSec": 5
       }
     ]

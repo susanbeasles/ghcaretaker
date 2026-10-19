@@ -115,19 +115,19 @@ export async function commitDetails(fullName, sha, token, fetcher = fetch) {
   }
 }
 
-// True when a `promote/pr-<n>-<sha12>` tag exists whose target (dereferenced through an annotated tag) is exactly `sha`.
-export async function hasPromotionTag(fullName, sha, token, fetcher = fetch) {
-  const { data } = await githubRequest('/repos/' + repoPath(fullName) + '/git/matching-refs/tags/promote/pr-', { token, fetcher });
-  const name = new RegExp('^refs/tags/promote/pr-\\d+-' + sha.slice(0, 12) + '$');
-  for (const ref of Array.isArray(data) ? data : []) {
-    if (!name.test(ref?.ref ?? '')) continue;
-    if (ref.object?.type === 'commit' && ref.object.sha === sha) return true;
-    if (ref.object?.type === 'tag' && SHA.test(ref.object.sha ?? '')) {
-      const tag = (await githubRequest('/repos/' + repoPath(fullName) + '/git/tags/' + ref.object.sha, { token, fetcher })).data;
-      if (tag?.object?.type === 'commit' && tag.object.sha === sha) return true;
-    }
+// Resolve a promotion ref to its exact full commit, including bounded annotated-tag chains.
+export async function promotionTagTarget(fullName, ref, token, fetcher = fetch) {
+  if (!/^promote\/pr-[1-9]\d{0,9}-[0-9a-f]{12}$/.test(ref ?? '')) return null;
+  let object = (await githubRequest('/repos/' + repoPath(fullName) + '/git/ref/tags/' + ref, { token, fetcher })).data?.object;
+  const seen = new Set();
+  for (let i = 0; i < 8; i++) {
+    if (!SHA.test(object?.sha ?? '')) return null;
+    if (object.type === 'commit') return object.sha;
+    if (object.type !== 'tag' || seen.has(object.sha)) return null;
+    seen.add(object.sha);
+    object = (await githubRequest('/repos/' + repoPath(fullName) + '/git/tags/' + object.sha, { token, fetcher })).data?.object;
   }
-  return false;
+  return null;
 }
 
 export function repoPath(fullName) {

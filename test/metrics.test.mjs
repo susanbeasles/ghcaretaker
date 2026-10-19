@@ -11,7 +11,7 @@ import { handleWebhook } from '../src/webhook.mjs';
 import { d1Database, memoryR2, secret, randomSecret, sign, sqlStorage, clock, pkcs8Pem, sha } from './fakes.mjs';
 
 const OWNER = 215839550;
-const MIGRATION = readFileSync(new URL('../migrations-observatory/0001_metrics.sql', import.meta.url), 'utf8');
+const MIGRATION = ['0001_metrics.sql', '0002_reported_telemetry.sql'].map(name => readFileSync(new URL('../migrations-observatory/' + name, import.meta.url), 'utf8')).join('\n');
 const REPO = { id: 42, full_name: 'susanbeasles/demo', owner: { id: OWNER } };
 const BLOB = 'https://productionresultssa1.blob.core.windows.net/actions-results/abc/logs/job.txt?sig=signed';
 
@@ -160,7 +160,7 @@ test('completed job: one redirect to an allowlisted host, Authorization not forw
   const j = row(METRICS_DB, 'SELECT * FROM jobs');
   assert.equal(j.job_id, 777); assert.equal(j.run_id, 9001); assert.equal(j.name, 'build'); assert.equal(j.status, 'completed');
   assert.equal(j.queued_at, '2026-10-15T11:50:06.000Z'); assert.deepEqual(JSON.parse(j.labels), ['ubuntu-24.04']); assert.equal(j.runner_group, 'GitHub Actions');
-  assert.deepEqual(JSON.parse(j.telemetry), telemetry()); assert.equal(j.telemetry_kind, 'measured');
+  assert.deepEqual(JSON.parse(j.telemetry), telemetry()); assert.equal(j.telemetry_kind, 'reported');
   assert.equal(row(METRICS_DB, 'SELECT COUNT(*) AS n FROM steps WHERE job_id = 777').n, 2);
   const [api, blob] = calls;
   assert.equal(api.url, 'https://api.github.com/repos/susanbeasles/demo/actions/jobs/777/logs');
@@ -368,4 +368,27 @@ test('no redirect is ever followed: GitHub API 3xx, a storage host 3xx (second h
   assert.deepEqual(visited, [BLOB], 'the second hop is not taken');
   assert.ok(!s.calls.some(c => c.url.startsWith('https://evil.example')));
   assert.equal(row(s.METRICS_DB, 'SELECT telemetry FROM jobs').telemetry, null);
+});
+
+test('a valid marker forged by an ordinary step is reported, never measured', async () => {
+  const forged = telemetry({ cpu_mean: 0.99, cpu_p95: 0.99, cpu_max: 0.99 });
+  const s = setup({ fetcher: githubFake({ blob: { status: 206, text: logText(['##[runner-telemetry]' + JSON.stringify(forged)]) } }) });
+  await s.collector.record(await observe(s.EVENTS, 'workflow_job', jobPayload({ steps: [] })));
+  const stored = row(s.METRICS_DB, 'SELECT telemetry, telemetry_kind FROM jobs');
+  assert.deepEqual(JSON.parse(stored.telemetry), forged);
+  assert.equal(stored.telemetry_kind, 'reported');
+});
+
+test('telemetry migration preserves historical rows and indexes while downgrading measured claims', () => {
+  const db = d1Database(readFileSync(new URL('../migrations-observatory/0001_metrics.sql', import.meta.url), 'utf8'));
+  db.db.prepare(`INSERT INTO jobs (job_id, run_id, attempt, repo_id, name, status, labels, queued_at, telemetry, telemetry_kind)
+    VALUES (?, 1, 1, 42, 'build', 'completed', '[]', '2026-10-15T11:00:00Z', ?, ?)`).run(1, JSON.stringify(telemetry()), 'measured');
+  db.db.prepare(`INSERT INTO jobs (job_id, run_id, attempt, repo_id, name, status, labels, queued_at)
+    VALUES (2, 1, 1, 42, 'missing', 'completed', '[]', '2026-10-15T11:00:00Z')`).run();
+  const before = db.db.prepare('SELECT * FROM jobs ORDER BY job_id').all();
+  db.db.exec(readFileSync(new URL('../migrations-observatory/0002_reported_telemetry.sql', import.meta.url), 'utf8'));
+  const after = db.db.prepare('SELECT * FROM jobs ORDER BY job_id').all();
+  assert.deepEqual(after.map(j => ({ ...j })), before.map(j => ({ ...j, telemetry_kind: j.telemetry ? 'reported' : null })));
+  assert.deepEqual(db.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'jobs' ORDER BY name").all().map(x => x.name), ['jobs_queued', 'jobs_repo_queued', 'jobs_run']);
+  assert.throws(() => db.db.prepare("UPDATE jobs SET telemetry_kind = 'measured' WHERE job_id = 1").run(), /CHECK constraint/);
 });

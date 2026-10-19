@@ -385,6 +385,10 @@ def decide(tool, inp, events, cur):
     if cum >= POL["cum_halt"]: verdict, reasons = "halt", reasons + [f"cumulative:{cum:.2f}"]
     elif cum >= POL["cum_deny"] and verdict == "allow": verdict, reasons = "deny", reasons + [f"cumulative:{cum:.2f}"]
 
+    # Text rules are diagnostics, never authority for an arbitrary host process.
+    if tool in ("Bash", "exec_command", "shell", "shell_command") and verdict == "allow":
+        verdict, reasons = "deny", reasons + ["unconfined process: use the isolated executor"]
+
     # gray zone -> optional model
     if verdict == "allow" and (0.4 <= risk < 1.0 or chain_hits):
         mv = model_verdict(tool, inp, hits, chain_hits, events)

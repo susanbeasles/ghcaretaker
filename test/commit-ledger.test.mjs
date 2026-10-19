@@ -14,7 +14,7 @@ function details(n, o = {}) {
 
 function setup({ overrides = {}, alertStatus = () => 204, tagged = () => false, apiFails = () => false } = {}) {
   const now = clock(), storage = sqlStorage(), EVENTS = memoryR2(), alerts = [], lookups = [], tagChecks = [];
-  const env = { EVENTS, ALERT_WEBHOOK_URL: secret('https://alerts.invalid/caretaker') };
+  const env = { PROMOTER_ACTOR_ID: '99', EVENTS, ALERT_WEBHOOK_URL: secret('https://alerts.invalid/caretaker') };
   const core = new CommitLedgerCore(storage, env, {
     now,
     fetcher: async (url, init) => { const status = alertStatus(alerts.length); alerts.push({ url, status, body: JSON.parse(init.body), init }); return new Response(null, { status }); },
@@ -25,6 +25,7 @@ function setup({ overrides = {}, alertStatus = () => 204, tagged = () => false, 
       const n = Number(Object.entries(overrides).find(([, d]) => d.sha === s)?.[0] ?? [...Array(2000).keys()].find(i => sha(i) === s));
       return overrides[n] ?? details(n);
     },
+    promotionTagTarget: async (_r, ref) => { const n = [...Array(2000).keys()].find(i => ref.endsWith(sha(i).slice(0, 12))); return n === undefined ? null : sha(n); },
     hasPromotionTag: async (_r, s) => { tagChecks.push(s); return tagged(s); },
   });
   return { core, storage, EVENTS, now, alerts, lookups, tagChecks };
@@ -32,7 +33,7 @@ function setup({ overrides = {}, alertStatus = () => 204, tagged = () => false, 
 
 const push = (o = {}) => ({ type: 'push', repo_id: REPO, full_name: 'susanbeasles/demo', installation_id: 7, delivery_id: crypto.randomUUID(),
   ref: 'refs/heads/main', before: sha(1), after: sha(2), created: false, deleted: false, forced: false, pusher: 'susanbeasles', commits: [sha(2)], commits_truncated: false, ...o });
-const create = (ref, o = {}) => ({ type: 'create', repo_id: REPO, full_name: 'susanbeasles/demo', installation_id: 7, delivery_id: crypto.randomUUID(), ref, ref_type: 'tag', ...o });
+const create = (ref, o = {}) => ({ type: 'create', repo_id: REPO, full_name: 'susanbeasles/demo', installation_id: 7, delivery_id: crypto.randomUUID(), ref, ref_type: 'tag', actor_id: 99, ...o });
 const kinds = core => core.findings().items.map(f => f.kind).sort();
 const promoTag = (n, pr = 7) => `promote/pr-${pr}-${sha(n).slice(0, 12)}`;
 
@@ -86,7 +87,7 @@ test('unverified main commit and merge commit on main are findings; the same on 
   assert.equal(f.find(x => x.kind === 'main_commit_unverified').entry_seq, 2);
 });
 
-test('main commit without a promote/* tag after 15 minutes is a finding (API-checked); a tag found by the API clears it', async () => {
+test('main commits without authenticated creation evidence are flagged despite name-only API hints', async () => {
   const { core, now, tagChecks, alerts } = setup({ tagged: s => s === sha(3) });
   await core.ingest(push({ before: sha(1), after: sha(2), commits: [sha(2)] }));
   await core.ingest(push({ before: sha(2), after: sha(3), commits: [sha(3)] }));
@@ -94,13 +95,13 @@ test('main commit without a promote/* tag after 15 minutes is a finding (API-che
   now.advance(14 * 60_000); await core.alarm();
   assert.deepEqual(tagChecks, [], 'not before 15 minutes');
   now.advance(2 * 60_000); await core.alarm();
-  assert.deepEqual(tagChecks.sort(), [sha(2), sha(3)].sort());
-  assert.deepEqual(kinds(core), ['main_commit_missing_promotion_tag']);
-  assert.equal(core.findings().items[0].sha, sha(2));
+  assert.deepEqual(tagChecks, [], 'name-only API lookup cannot establish creator');
+  assert.deepEqual(kinds(core), ['main_commit_missing_promotion_tag', 'main_commit_missing_promotion_tag']);
+  assert.ok(core.findings().items.some(f => f.sha === sha(2)));
   assert.ok(alerts.some(a => a.body.code === 'main_commit_missing_promotion_tag'));
   // A late create event does not erase an already-raised finding.
   await core.ingest(create(promoTag(2))); await core.alarm();
-  assert.deepEqual(kinds(core), ['main_commit_missing_promotion_tag']);
+  assert.deepEqual(kinds(core), ['main_commit_missing_promotion_tag', 'main_commit_missing_promotion_tag']);
 });
 
 test('a promote tag seen before the main push (out-of-order delivery) satisfies the check immediately', async () => {
@@ -208,4 +209,32 @@ test('pure rules match the ADR list exactly', () => {
   assert.deepEqual(refFindings(u({ ref: 'refs/tags/x', created: true, before: ZERO }), sha(2)), [], 'same target re-created');
   assert.deepEqual(mainCommitFindings(details(4)), []);
   assert.deepEqual(mainCommitFindings({ ...details(4), verified: undefined }).map(f => f.kind), ['main_commit_unverified']);
+});
+
+for (const beforeMain of [true, false]) test('promotion actor and full target are required, order=' + beforeMain, async () => {
+  for (const scenario of ['wrong_actor', 'wrong_target', 'unconfigured', 'valid']) {
+    const { core, now } = setup();
+    if (scenario === 'unconfigured') delete core.env.PROMOTER_ACTOR_ID;
+    core.deps.promotionTagTarget = async () => scenario === 'wrong_target' ? sha(3) : sha(2);
+    const event = create(promoTag(2), { actor_id: scenario === 'wrong_actor' ? 100 : 99 });
+    if (beforeMain) await core.ingest(event);
+    await core.ingest(push());
+    if (!beforeMain) await core.ingest(event);
+    await core.alarm(); now.advance(16 * 60_000); await core.alarm();
+    assert.equal(core.head().promotions_pending, 0);
+    assert.equal(kinds(core).includes('main_commit_missing_promotion_tag'), scenario !== 'valid', scenario);
+  }
+});
+
+test('absent promotion ref is untrusted evidence and cannot block later pushes', async()=>{
+ const {core,now}=setup();core.deps.promotionTagTarget=async()=>{throw Object.assign(Error('gone'),{code:'github_http_404',status:404});};
+ await core.ingest(create(promoTag(2)));await core.ingest(push());await core.alarm();
+ assert.equal(core.storage.sql.exec('SELECT COUNT(*) AS n FROM inbox').toArray()[0].n,0);
+ assert.ok(core.entries(10).items.some(e=>e.kind==='commit'));
+ now.advance(16*60000);await core.alarm();assert.ok(kinds(core).includes('main_commit_missing_promotion_tag'));
+});
+test('transient promotion lookup preserves ordered retry then recovers',async()=>{
+ const {core,now}=setup();let calls=0;core.deps.promotionTagTarget=async()=>{if(++calls===1)throw Object.assign(Error('down'),{code:'github_http_502',status:502});return sha(2);};
+ await core.ingest(create(promoTag(2)));await core.ingest(push());await core.alarm();assert.equal(core.storage.sql.exec('SELECT COUNT(*) AS n FROM inbox').toArray()[0].n,2);
+ now.advance(3600000);await core.alarm();assert.equal(core.storage.sql.exec('SELECT COUNT(*) AS n FROM inbox').toArray()[0].n,0);assert.equal(core.head().promotions_pending,0);
 });

@@ -1,7 +1,7 @@
 // Parser for the one line `actions/runner-telemetry` (workflow_depot) prints in a job's post step:
 //   ##[runner-telemetry]{"schema":"runner-telemetry/v1",...}
 // The job log is untrusted text (any step can print anything), so the line is validated strictly: exact key set,
-// bounded numbers, no extra fields. Only the LAST line containing the marker is considered; when it is missing or
+// bounded numbers, no extra fields. Validation establishes shape only, never authenticity or measurement provenance. Only the LAST line containing the marker is considered; when it is missing or
 // invalid there is no telemetry (null), never a fallback to an earlier line and never an invented value.
 import { decodeUtf8 } from './bytes.mjs';
 

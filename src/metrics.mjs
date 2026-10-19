@@ -274,7 +274,7 @@ export function metricsCollector(env, deps = {}) {
         const tok = await tokenOrNull(payload, repoId, ctx);
         if (tok) {
           const { telemetry, reason } = await jobTelemetry(fullName, tok, job, { ...ctx, job_id: job.job_id });
-          if (telemetry) tail.push(db.prepare("UPDATE jobs SET telemetry = ?, telemetry_kind = 'measured' WHERE job_id = ? AND telemetry IS NULL").bind(JSON.stringify(telemetry), job.job_id));
+          if (telemetry) tail.push(db.prepare("UPDATE jobs SET telemetry = ?, telemetry_kind = 'reported' WHERE job_id = ? AND telemetry IS NULL").bind(JSON.stringify(telemetry), job.job_id));
           // No line is the normal case for a job that does not use the action: complete, not an error.
           else if (reason === 'invalid_line') log('warning', 'runner_telemetry_rejected', { ...ctx, job_id: job.job_id });
         }
