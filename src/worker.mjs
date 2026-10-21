@@ -1,4 +1,4 @@
-import {tools,validate} from './policy.mjs';
+import {tools,validate,route} from './policy.mjs';
 import {audit,recent,readRecord} from './audit.mjs';
 import {github,UpstreamError} from './github.mjs';
 import {envelope} from './content.mjs';
@@ -23,8 +23,20 @@ export async function handle(request,env,dependencies={}){
   if(request.method!=='POST')return json({error:'Method denied'},405);
   let msg;try{msg=await readRequest(request);}catch{return json({error:'Invalid or oversized JSON'},400);}
   if(!msg||Array.isArray(msg)||msg.jsonrpc!=='2.0'||typeof msg.method!=='string')return json({error:'Invalid JSON-RPC'},400);
-  await audit(env,{correlation_id:correlation,category:'success',phase:'request',operation:msg.method,subject:identity.subject,request:msg});
-  const respond=async result=>{await audit(env,{correlation_id:correlation,category:'success',phase:'response',operation:msg.method,response:result});return json({jsonrpc:'2.0',id:msg.id,result});};
+  // Only validated, granted single-repository calls may label their bodies.
+  // Audit reads and aggregate responses stay unscoped to prevent scope laundering.
+  let repository=null;
+  try{
+   if(msg.method==='tools/call'){
+    const {name,arguments:args={}}=msg.params||{};validate(name,args);
+    if(route(name,args,env.GITHUB_OWNER)&&args.repo){
+     const candidate=env.GITHUB_OWNER+'/'+args.repo;
+     if(identity.repos?.includes(candidate)||identity.repos?.includes(env.GITHUB_OWNER+'/*'))repository=candidate;
+    }
+   }
+  }catch{/* Invalid requests remain unscoped. */}
+  await audit(env,{repository,correlation_id:correlation,category:'success',phase:'request',operation:msg.method,subject:identity.subject,request:msg});
+  const respond=async result=>{await audit(env,{repository,correlation_id:correlation,category:'success',phase:'response',operation:msg.method,response:result});return json({jsonrpc:'2.0',id:msg.id,result});};
   if(msg.id===undefined){if(msg.method==='notifications/initialized')return new Response(null,{status:202});return json({error:'Unsupported notification'},400);}
   if(msg.method==='initialize'){
    const versions=['2024-11-05','2025-03-26','2025-06-18','2026-07-28'];
@@ -37,11 +49,11 @@ export async function handle(request,env,dependencies={}){
   try{
    const t=validate(name,args);
    if(!t.annotations.readOnlyHint&&!identity.scopes.includes('github:collaborate'))throw Error('Collaboration scope required');
-   const data=name==='audit_recent'?await recent(env,args.category):name==='audit_record'?await readRecord(env,args.id):await (dependencies.github||github)(env,identity,name,args,correlation);
+   const data=name==='audit_recent'?await recent(env,args.category,identity):name==='audit_record'?await readRecord(env,args.id,identity):await (dependencies.github||github)(env,identity,name,args,correlation);
    return respond(envelope(data));
   }catch(error){
    const cat=error instanceof UpstreamError?error.category:'policy';
-   await audit(env,{correlation_id:correlation,category:cat,phase:'tool_error',operation:name||'unknown',status:error.status||0,response:{message:error instanceof UpstreamError?'GitHub request failed':error.message}});
+   await audit(env,{repository,correlation_id:correlation,category:cat,phase:'tool_error',operation:name||'unknown',status:error.status||0,response:{message:error instanceof UpstreamError?'GitHub request failed':error.message}});
    const result=envelope({error:error instanceof UpstreamError?'GitHub request failed; check audit trail.':error.message,correlation_id:correlation,status:error.status,uncertain_write:!tools.find(t=>t.name===name)?.annotations.readOnlyHint&&(!error.status||error.status>=500)});result.isError=true;
    return json({jsonrpc:'2.0',id:msg.id,result});
   }

@@ -3,42 +3,26 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash|apply_patch|Edit|Write|mcp__.*",
+        "matcher": "*",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$(git rev-parse --show-toplevel)/.agent-guard/guard.py\"",
+            "command": "/opt/agent-guard/bin/agent-guard pretool",
             "timeout": 15,
             "statusMessage": "agent-guard: policy"
-          },
-          {
-            "type": "command",
-            "command": "python3 \"$(git rev-parse --show-toplevel)/.agent-guard/supervisor.py\"",
-            "timeout": 20,
-            "statusMessage": "agent-guard: supervisor"
           }
         ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "Bash|mcp__.*",
+        "matcher": "mcp__agent_guard__write_file",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$(git rev-parse --show-toplevel)/.agent-guard/guard.py\"",
+            "command": "/opt/agent-guard/bin/agent-guard check post-edit",
             "timeout": 15,
             "statusMessage": "agent-guard: output scan"
-          }
-        ]
-      },
-      {
-        "matcher": "apply_patch|Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"$(git rev-parse --show-toplevel)\"/.guard/hooks/post-edit-check.py",
-            "timeout": 120
           }
         ]
       }
@@ -49,7 +33,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$(git rev-parse --show-toplevel)\"/.guard/hooks/session-start.py",
+            "command": "/opt/agent-guard/bin/agent-guard preflight",
             "timeout": 5
           }
         ]
@@ -60,7 +44,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$(git rev-parse --show-toplevel)\"/.guard/hooks/stop-gate.py",
+            "command": "/opt/agent-guard/bin/agent-guard check stop",
             "timeout": 600
           }
         ]

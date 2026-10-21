@@ -10,7 +10,7 @@
 import { GENESIS, canonical, link, verifyEntries, verifyRange, mutex } from './chain.mjs';
 import { OUTBOX_SCHEMA, enqueue, drain, nextDue, pendingCounts, prune, backoff, ESCALATE_AT } from './outbox.mjs';
 import { MAIN, refFindings, mainCommitFindings, mainCommits, promotionTagPrefix, PROMOTION_GRACE_MS, refGap, forcePushFinding, severityOf } from './integrity.mjs';
-import { mintInstallationToken, commitDetails, hasPromotionTag, compareCommits, listMatchingRefs, COMPARE_BOUND_ERRORS, SHA } from './github-app.mjs';
+import { mintInstallationToken, commitDetails, promotionTagTarget, compareCommits, listMatchingRefs, COMPARE_BOUND_ERRORS, SHA } from './github-app.mjs';
 import { deliverAlert, findingAlert } from './alerts.mjs';
 import { CodedError, sha256Hex } from './bytes.mjs';
 import { boundedLimit, optionalCursor } from './event-ledger-core.mjs';
@@ -44,6 +44,10 @@ const SCHEMA = [
     resolved_by TEXT, resolved_at TEXT, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT)`,
   'CREATE TABLE IF NOT EXISTS promote_tags (tag TEXT PRIMARY KEY, prefix TEXT NOT NULL, delivery_id TEXT NOT NULL, seen_at TEXT NOT NULL)',
   'CREATE INDEX IF NOT EXISTS promote_tags_prefix ON promote_tags(prefix)',
+  'CREATE TABLE IF NOT EXISTS verified_promote_tags (tag TEXT PRIMARY KEY, sha TEXT NOT NULL, actor_id INTEGER NOT NULL, delivery_id TEXT NOT NULL)',
+  'CREATE INDEX IF NOT EXISTS verified_promote_tags_sha_actor ON verified_promote_tags(sha, actor_id)',
+  'CREATE INDEX IF NOT EXISTS verified_promote_tags_sha_actor_tag ON verified_promote_tags(sha, actor_id, tag)',
+  'CREATE TABLE IF NOT EXISTS promotion_check_progress (sha TEXT NOT NULL, actor_id INTEGER NOT NULL, last_tag TEXT NOT NULL, PRIMARY KEY (sha, actor_id))',
   `CREATE TABLE IF NOT EXISTS findings (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, ref TEXT, sha TEXT NOT NULL, entry_seq INTEGER,
     delivery_id TEXT NOT NULL, detail TEXT NOT NULL, detected_at TEXT NOT NULL, UNIQUE (kind, sha, delivery_id))`,
   'CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
@@ -74,7 +78,21 @@ export class CommitLedgerCore {
     this.storage = storage; this.sql = storage.sql; this.env = env; this.deps = deps;
     this.now = deps.now || Date.now; this.fetcher = deps.fetcher || fetch; this.lock = mutex(); this.cachedToken = null;
     for (const statement of SCHEMA) this.sql.exec(statement);
+    this.storage.transactionSync(() => {
+      const marker = 'migration:exact-promotion-evidence:v1';
+      if (this.meta(marker) !== null) return;
+      // Legacy create_event and api resolutions both accepted prefix-only evidence.
+      // Recheck every pre-marker satisfied row; never infer trust from resolved_by.
+      // Keep the append-only ledger, findings, and original grace deadline intact.
+      this.sql.exec("DELETE FROM promotion_check_progress WHERE sha IN (SELECT sha FROM promotions WHERE status = 'satisfied')");
+      this.sql.exec("UPDATE promotions SET status = 'pending', resolved_by = NULL, resolved_at = NULL, attempts = 0, last_error = NULL, next_check_at = ? WHERE status = 'satisfied'", this.now());
+      this.setMeta(marker, this.iso(this.now()));
+    });
   }
+
+  // Awaited by the Durable Object initialization gate, including after an alarm-write
+  // failure: the migration marker does not imply pending work has been scheduled.
+  async initialize() { await this.schedule({ api: API_BUDGET }); }
 
   meta(key) { return this.sql.exec('SELECT value FROM meta WHERE key = ?', key).toArray()[0]?.value ?? null; }
   setMeta(key, value) { this.sql.exec('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, String(value)); }
@@ -105,9 +123,13 @@ export class CommitLedgerCore {
     return { accepted: true };
   }
 
-  async token() {
+  async token(budget = null) {
     const now = this.now();
     if (this.cachedToken && this.cachedToken.expires_at - now > 300_000) return this.cachedToken.token;
+    if (budget) {
+      if (budget.api <= 0) throw new CodedError('deferred');
+      budget.api--;
+    }
     const installation = Number(this.meta('installation_id'));
     this.cachedToken = await (this.deps.mintToken ?? mintInstallationToken)(this.env, installation, this.repoId(), this.fetcher);
     return this.cachedToken.token;
@@ -152,7 +174,7 @@ export class CommitLedgerCore {
       if (!row || row.next_attempt_at > this.now()) return;
       const item = JSON.parse(row.payload);
       try {
-        if (item.type === 'create') { this.applyCreate(row, item); continue; }
+        if (item.type === 'create') { await this.applyCreate(row, item, budget); continue; }
         const plan = await this.pushPlan(row, item, budget);
         if (!plan || !await this.fetchDetails(item, plan.shas, budget)) return;
         await this.applyPush(row, item, plan);
@@ -187,7 +209,7 @@ export class CommitLedgerCore {
   // Which commits this push brought, and where each was learned. Not truncated: the payload's list (source
   // `webhook`). Possibly truncated: the whole range from GET /compare (commits only found there: `api_compare`).
   // When the range cannot be fetched, the listed commits are recorded with complete: false, an incomplete_push
-  // finding is raised and a `backfill` outbox row keeps retrying. Returns null when the API budget ran out.
+  // finding is raised; only transient failures enqueue a bounded backfill. Returns null when the API budget ran out.
   async pushPlan(row, item, budget) {
     const listed = union(item.commits), tip = mainCommits(item).filter(s => !listed.includes(s));
     const sources = new Map([...listed, ...tip].map(s => [s, 'webhook']));
@@ -211,7 +233,7 @@ export class CommitLedgerCore {
       }
       this.sql.exec('INSERT INTO push_compare (delivery_id, result) VALUES (?, ?) ON CONFLICT(delivery_id) DO NOTHING', item.delivery_id, JSON.stringify(result));
     }
-    if (!result.ok) return partial(result.reason, true, base);
+    if (!result.ok) return partial(result.reason, !COMPARE_BOUND_ERRORS.has(result.reason), base);
     const shas = union(result.shas, listed, tip);
     for (const s of shas) if (!sources.has(s)) sources.set(s, 'api_compare');
     return { shas, sources, complete: true, compare: { status: result.status, total_commits: result.total_commits }, incomplete: null };
@@ -261,7 +283,7 @@ export class CommitLedgerCore {
   judgeMain(shas, detailsOf, seqOf, delivery_id, now) {
     for (const sha of shas) {
       for (const f of mainCommitFindings({ ...detailsOf(sha), sha })) this.recordFinding({ ...f, entry_seq: seqOf(sha), delivery_id }, now);
-      const tagged = this.sql.exec('SELECT tag FROM promote_tags WHERE prefix = ? LIMIT 1', sha.slice(0, 12)).toArray()[0];
+      const tagged = this.sql.exec('SELECT tag FROM verified_promote_tags WHERE sha = ? AND actor_id = ? LIMIT 1', sha, this.promoterId()).toArray()[0];
       this.sql.exec('INSERT INTO promotions (sha, entry_seq, delivery_id, due_at, next_check_at, status, resolved_by, resolved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(sha) DO NOTHING',
         sha, seqOf(sha), delivery_id, now + PROMOTION_GRACE_MS, now + PROMOTION_GRACE_MS,
         tagged ? 'satisfied' : 'pending', tagged ? 'create_event:' + tagged.tag : null, tagged ? this.iso(now) : null);
@@ -316,7 +338,7 @@ export class CommitLedgerCore {
   }
 
   // Outbox `backfill`: the commit range of a push (or a reconciled ref move) that could not be fetched before. Throws
-  // to be retried with backoff, forever; never marks a range complete without every commit.
+  // to be retried with bounded backoff; terminal failures remain explicitly incomplete.
   async backfill(p, budget) {
     if (!p || typeof p.ref !== 'string' || !SHA.test(p.head ?? '') || typeof p.base !== 'string' || typeof p.delivery_id !== 'string') throw new CodedError('bad_backfill');
     const cmp = await this.compare(p.base, p.head, budget);
@@ -335,17 +357,33 @@ export class CommitLedgerCore {
     });
   }
 
-  // A `create` of `promote/pr-<n>-<sha12>` clears the pending provenance check for the matching main commit.
-  // The name is authoritative here because the tag ruleset lets only the promoter create promote/* tags;
-  // the alarm path (hasPromotionTag) additionally dereferences the tag to the full commit sha.
-  applyCreate(row, item) {
+  // No configured promoter identity means no promotion evidence is trusted.
+  promoterId() {
+    const id = Number(this.env.PROMOTER_ACTOR_ID);
+    return Number.isSafeInteger(id) && id > 0 ? id : 0;
+  }
+
+  async applyCreate(row, item, budget) {
     const prefix = item.ref_type === 'tag' ? promotionTagPrefix(item.ref) : null, at = this.iso(this.now());
-    this.storage.transactionSync(() => {
-      if (prefix) {
-        this.sql.exec('INSERT INTO promote_tags (tag, prefix, delivery_id, seen_at) VALUES (?, ?, ?, ?) ON CONFLICT(tag) DO NOTHING', item.ref, prefix, item.delivery_id, at);
-        this.sql.exec("UPDATE promotions SET status = 'satisfied', resolved_by = ?, resolved_at = ? WHERE status = 'pending' AND substr(sha, 1, 12) = ?",
-          'create_event:' + item.ref, at, prefix);
+    let target = null, unavailable = null;
+    if (prefix && this.promoterId() && item.actor_id === this.promoterId()) {
+      try {
+        target = await (this.deps.promotionTagTarget ?? promotionTagTarget)(this.meta('full_name'), item.ref, await this.token(budget), this.fetcher, budget);
+      } catch (error) {
+        if (error?.code === 'deferred') throw error;
+        if (![404, 422].includes(error?.status) && row.attempts + 1 < 12 && this.now() - row.queued_at < 24 * 60 * 60_000) throw error;
+        unavailable = errorCode(error);
       }
+      if (!SHA.test(target ?? '') || !target.startsWith(prefix)) target = null;
+    }
+    this.storage.transactionSync(() => {
+      if (target) {
+        this.sql.exec('INSERT INTO verified_promote_tags (tag, sha, actor_id, delivery_id) VALUES (?, ?, ?, ?) ON CONFLICT(tag) DO NOTHING', item.ref, target, item.actor_id, item.delivery_id);
+        this.sql.exec("UPDATE promotions SET status = 'satisfied', resolved_by = ?, resolved_at = ? WHERE status = 'pending' AND sha = ?",
+          'verified_create:' + item.ref, at, target);
+        this.sql.exec('DELETE FROM promotion_check_progress WHERE sha = ?', target);
+      }
+      if (unavailable) this.operationalAlert('promotion_evidence_unavailable', 'promotion-create:' + item.delivery_id, { ref: item.ref, error: unavailable });
       this.sql.exec('DELETE FROM inbox WHERE id = ?', row.id);
       this.markApplied(item.delivery_id, this.now());
     });
@@ -454,9 +492,9 @@ export class CommitLedgerCore {
       if (failure) {
         const bounded = COMPARE_BOUND_ERRORS.has(failure);
         plan = entry({ reason: 'ref_reconcile', complete: false }, [], [bounded
-          ? { kind: 'incomplete_push', sha: to, detail: { reason: failure, before: from, after: to, source: 'ref_reconcile', retrying: true } }
+          ? { kind: 'incomplete_push', sha: to, detail: { reason: failure, before: from, after: to, source: 'ref_reconcile', retrying: false } }
           : { kind: 'ref_drift', sha: to, detail: { reason: 'compare_unavailable', ledger_head: from, github_head: to, error: failure } }]);
-        plan.backfill = bounded;
+        plan.backfill = false;
         stats[bounded ? 'incomplete' : 'drift']++;
       } else if (cmp.status === 'ahead' || cmp.status === 'identical') {
         plan = entry({ reason: 'ref_reconcile', compare_status: cmp.status }, cmp.commits);
@@ -558,18 +596,31 @@ export class CommitLedgerCore {
     const rows = this.sql.exec("SELECT * FROM promotions WHERE status = 'pending' AND due_at <= ? AND next_check_at <= ? ORDER BY due_at LIMIT 10", now, now).toArray();
     for (const row of rows) {
       if (budget.api <= 0) return;
-      budget.api--;
       try {
-        const tagged = await (this.deps.hasPromotionTag ?? hasPromotionTag)(this.meta('full_name'), row.sha, await this.token(), this.fetcher);
+        const actorId = this.promoterId();
+        let lastTag = this.sql.exec('SELECT last_tag FROM promotion_check_progress WHERE sha = ? AND actor_id = ?', row.sha, actorId).toArray()[0]?.last_tag ?? '';
+        let tagged = false;
+        for (;;) {
+          // Keyset pagination bounds both materialization and lookup work. Only completed
+          // negative lookups advance the cursor; a deferred tag chain retries next alarm.
+          const e = this.sql.exec('SELECT tag FROM verified_promote_tags WHERE sha = ? AND actor_id = ? AND tag > ? ORDER BY tag LIMIT 1', row.sha, actorId, lastTag).toArray()[0];
+          if (!e) break;
+          const target = await (this.deps.promotionTagTarget ?? promotionTagTarget)(this.meta('full_name'), e.tag, await this.token(budget), this.fetcher, budget);
+          if (target === row.sha) { tagged = true; break; }
+          lastTag = e.tag;
+          this.sql.exec('INSERT INTO promotion_check_progress (sha, actor_id, last_tag) VALUES (?, ?, ?) ON CONFLICT(sha, actor_id) DO UPDATE SET last_tag = excluded.last_tag', row.sha, actorId, lastTag);
+        }
         const t = this.now();
         this.storage.transactionSync(() => {
           const current = this.sql.exec('SELECT status FROM promotions WHERE sha = ?', row.sha).toArray()[0];
+          this.sql.exec('DELETE FROM promotion_check_progress WHERE sha = ?', row.sha);
           if (current?.status !== 'pending') return; // cleared by a create event meanwhile
           if (tagged) { this.sql.exec("UPDATE promotions SET status = 'satisfied', resolved_by = 'api', resolved_at = ? WHERE sha = ?", this.iso(t), row.sha); return; }
           this.sql.exec("UPDATE promotions SET status = 'flagged', resolved_by = 'api', resolved_at = ? WHERE sha = ?", this.iso(t), row.sha);
           this.recordFinding({ kind: 'main_commit_missing_promotion_tag', ref: 'refs/heads/main', sha: row.sha, entry_seq: row.entry_seq, delivery_id: row.delivery_id, detail: { due_at: this.iso(row.due_at) } }, t);
         });
       } catch (error) {
+        if (error?.code === 'deferred') return;
         const attempts = row.attempts + 1, code = errorCode(error);
         this.sql.exec('UPDATE promotions SET attempts = ?, next_check_at = ?, last_error = ? WHERE sha = ?', attempts, this.now() + RETRY_MS, code, row.sha);
         log('warning', 'promotion_check_retry', { repo_id: this.repoId(), sha: row.sha, attempts, error: code });

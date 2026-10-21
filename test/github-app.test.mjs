@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mintInstallationToken, commitDetails, hasPromotionTag } from '../src/github-app.mjs';
+import { mintInstallationToken, commitDetails, promotionTagTarget } from '../src/github-app.mjs';
 import { unb64 } from '../src/crypto.mjs';
 import { secret, pkcs8Pem, sha } from './fakes.mjs';
 
@@ -65,16 +65,23 @@ test('commit details: bounded files list, message reduced to sha256, verificatio
   await assert.rejects(commitDetails('../../x', s, 'tok', fetcher), /bad_repo_name/);
 });
 
-test('promotion tag lookup dereferences annotated tags to the exact commit and ignores prefix look-alikes', async () => {
-  const target = sha(5), tagObject = sha(500), other = sha(6);
-  const refs = [
-    { ref: `refs/tags/promote/pr-9-${target.slice(0, 12)}x`, object: { type: 'commit', sha: target } },
-    { ref: `refs/tags/promote/pr-8-${target.slice(0, 12)}`, object: { type: 'commit', sha: other } },
-    { ref: `refs/tags/promote/pr-7-${target.slice(0, 12)}`, object: { type: 'tag', sha: tagObject } },
-  ];
-  const fetcher = async url => url.includes('/git/matching-refs/') ? Response.json(refs) : Response.json({ object: { type: 'commit', sha: target } });
-  assert.equal(await hasPromotionTag('susanbeasles/demo', target, 'tok', fetcher), true);
-  const wrongTarget = async url => url.includes('/git/matching-refs/') ? Response.json(refs) : Response.json({ object: { type: 'commit', sha: other } });
-  assert.equal(await hasPromotionTag('susanbeasles/demo', target, 'tok', wrongTarget), false);
-  assert.equal(await hasPromotionTag('susanbeasles/demo', target, 'tok', async () => Response.json([])), false);
+test('promotion targets resolve exact refs and nested annotated tags, refusing loops and malformed names', async () => {
+ const target=sha(5), tag=sha(500), nested=sha(501), ref='promote/pr-7-'+target.slice(0,12);let calls=0;
+ const fetcher=async url=>{calls++;return Response.json({object:url.includes('/git/ref/')?{type:'tag',sha:tag}:url.endsWith(tag)?{type:'tag',sha:nested}:{type:'commit',sha:target}});};
+ assert.equal(await promotionTagTarget('susanbeasles/demo',ref,'tok',fetcher),target);assert.equal(calls,3);
+ assert.equal(await promotionTagTarget('susanbeasles/demo',ref+'x','tok',fetcher),null);assert.equal(calls,3);
+ assert.equal(await promotionTagTarget('susanbeasles/demo',ref,'tok',async()=>Response.json({object:{type:'tag',sha:tag}})),null);
+ assert.equal(await promotionTagTarget('susanbeasles/demo',ref,'tok',async()=>Response.json({object:{type:'commit',sha:sha(6)}})),sha(6),'full target returned; core must compare exact expected SHA');
+});
+
+test('promotion target charges each request and defers before the next annotated tag fetch', async () => {
+ const target=sha(5), ref='promote/pr-7-'+target.slice(0,12), budget={api:2};let calls=0;
+ const fetcher=async()=>Response.json({object:++calls<3?{type:'tag',sha:sha(500+calls)}:{type:'commit',sha:target}});
+ await assert.rejects(promotionTagTarget('susanbeasles/demo',ref,'tok',fetcher,budget),{code:'deferred'});
+ assert.equal(calls,2);assert.equal(budget.api,0);
+ await assert.rejects(promotionTagTarget('susanbeasles/demo',ref,'tok',fetcher,budget),{code:'deferred'});
+ assert.equal(calls,2);
+ const fresh={api:3};calls=0;
+ assert.equal(await promotionTagTarget('susanbeasles/demo',ref,'tok',fetcher,fresh),target);
+ assert.equal(calls,3);assert.equal(fresh.api,0);
 });

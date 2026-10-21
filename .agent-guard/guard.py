@@ -3,7 +3,7 @@
 PreToolUse: deny reads of secrets/quarantine, deny unlisted fetch/MCP, scan file content before read.
 PostToolUse: scan tool output for injection markers and warn the agent.
 """
-import fnmatch, hashlib, json, os, re, shlex, sys, time, urllib.parse
+import fnmatch, hashlib, json, os, re, shlex, stat, sys, time, urllib.parse
 
 import subprocess as _sp
 def _project_root():
@@ -66,7 +66,22 @@ def norm(path):
     path = os.path.expanduser(path)
     if not os.path.isabs(path):
         path = os.path.join(CWD, path)
-    return os.path.normpath(path)
+    if ".." in path.split(os.sep):
+        deny("Parent traversal is not accepted by file mediation.")
+    path = os.path.normpath(path)
+    current = os.path.sep
+    for component in path.split(os.sep):
+        if not component: continue
+        current = os.path.join(current, component)
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            break
+        if stat.S_ISLNK(info.st_mode):
+            deny("Symbolic links are not accepted by file mediation.")
+        if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+            deny("Hardlinked files are not accepted by file mediation.")
+    return path
 
 def rel(path):
     try: return os.path.relpath(path, ROOT)
@@ -147,7 +162,7 @@ def normalize_event(data):
         except Exception: inp = {"command": inp}
     inp = inp or {}
     # Copilot runtime names -> Claude names (when a camelCase config was used)
-    tool = {"bash": "Bash", "powershell": "Bash", "view": "Read", "create": "Write", "edit": "Edit",
+    tool = {"bash": "Bash", "powershell": "Bash", "exec_command": "Bash", "shell_command": "Bash", "shell": "Bash", "view": "Read", "create": "Write", "edit": "Edit",
             "str_replace_editor": "Edit", "grep": "Grep", "rg": "Grep", "glob": "Glob",
             "web_fetch": "WebFetch", "web_search": "WebSearch"}.get(tool, tool)
     # Codex apply_patch carries the patch text in tool_input.command; treat as Write with file list
@@ -273,13 +288,15 @@ def pre(tool, inp):
         hits, worst = scan_text(cmd, "bash-command")
         if worst == "deny":
             deny(f"Command contains injection markers: {', '.join(hits)}.", tool=tool, cmd=cmd[:300])
-        log("allow", tool=tool, cmd=cmd[:300])
+        deny("Unconfined shell execution is disabled. Use the installed agent_guard executor.", tool=tool)
 
     elif tool.startswith("mcp__"):
         server = tool.split("__")[1] if "__" in tool else tool
         if server not in POL["allowed_mcp_servers"]:
             deny(f"MCP server '{server}' is not allowed in this repository.", tool=tool)
         log("allow", tool=tool)
+    else:
+        deny("Unknown tool has no authorized execution path.", tool=tool)
 
 # ---- PostToolUse --------------------------------------------------------------------
 
@@ -302,8 +319,12 @@ def main():
     except Exception as _e:
         _fail_closed(f"hook input is not valid JSON: {_e}")
     global CWD
+    if not isinstance(data, dict):
+        _fail_closed("hook input must be an object")
     CWD = data.get("cwd") or ROOT
     ev, tool, inp, resp = normalize_event(data)
+    if ev not in ("PreToolUse", "PostToolUse"):
+        _fail_closed("unknown hook event")
     if ev == "PreToolUse":
         pre(tool, inp)
     elif ev == "PostToolUse":

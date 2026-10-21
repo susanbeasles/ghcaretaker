@@ -66,7 +66,9 @@ test('upstream installation identity and exact token scopes pin credentials; Git
   if(url.endsWith('/access_tokens')){assert.deepEqual(JSON.parse(opts.body).permissions,{...permissions,issues:'read',pull_requests:'read'});return Response.json({token:'neverlogme',expires_at:new Date(Date.now()+3600000).toISOString(),permissions:JSON.parse(opts.body).permissions});}
   return Response.json({type:'file',encoding:'base64',size:5,content:btoa('hello'),download_url:'https://evil',path:'test.txt'});
  });
- assert.equal(result.data.text,'hello');assert.equal(calls.length,3);assert.ok(!JSON.stringify(e.events).includes('neverlogme'));
+ assert.equal(result.data.text,'hello');assert.equal(calls.length,3);
+ assert.ok(e.events.filter(x=>x.operation==='read_file').every(x=>x.repository==='personal/safe'));
+ assert.ok(e.events.filter(x=>x.operation!=='read_file').every(x=>x.repository===null));assert.ok(!JSON.stringify(e.events).includes('neverlogme'));
 });
 test('wrong-account installation stops before minting; unexpected broader permissions revoke token',async()=>{
  const e=await githubEnv();let calls=0;

@@ -38,7 +38,9 @@ test('real runtime: Access-gated dashboard host, D1 metrics from a webhook, back
   ] }));
   try {
     const db = await mf.getD1Database('METRICS_DB', 'ghcaretaker');
-    await db.exec((await readFile('migrations-observatory/0001_metrics.sql', 'utf8')).replaceAll('\n', ' '));
+    for (const migration of ['0001_metrics.sql', '0002_reported_telemetry.sql']) {
+      await db.exec((await readFile('migrations-observatory/' + migration, 'utf8')).replace(/--[^\n]*/g, '').replaceAll('\n', ' '));
+    }
     const dash = async (path, token) => mf.dispatchFetch('https://caretaker.vespoli.me' + path, { redirect: 'manual', headers: token ? { 'cf-access-jwt-assertion': token } : {} });
 
     let r = await dash('/');

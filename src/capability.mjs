@@ -15,7 +15,7 @@ export class CaretakerCore {
     if(request.headers.has('origin')&&request.headers.get('origin')!==this.env.AUTH_ORIGIN)return Response.json({error:'origin-denied'},{status:403});
     const headers=new Headers(request.headers);headers.delete('authorization');headers.delete('cookie');headers.delete('cf-access-jwt-assertion');headers.delete('origin');
     const internal=new Request(this.env.PUBLIC_ORIGIN+this.env.MCP_PATH,{method:request.method,headers,body:request.body,duplex:'half'});
-    return handle(internal,this.env,{authenticate:async()=>({subject:this.env.GITHUB_OWNER_ID,scopes:session.scopes}),github:async(_env,identity,name,args,...rest)=>{
+    return handle(internal,this.env,{authenticate:async()=>({subject:this.env.GITHUB_OWNER_ID,scopes:session.scopes,repos:[...session.repos]}),github:async(_env,identity,name,args,...rest)=>{
       const all=session.repos.includes(this.env.GITHUB_OWNER+'/*');
       if(!all&&(name==='list_repositories'||!session.repos.includes(this.env.GITHUB_OWNER+'/'+args.repo)))throw Error('Repository not granted');
       return github({...this.env,...await vault(this.env).config()},identity,name,args,...rest);

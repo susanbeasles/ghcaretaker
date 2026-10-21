@@ -48,7 +48,7 @@ export function pushSubset(payload, deliveryId) {
 
 export function createSubset(payload, deliveryId) {
   if (typeof payload.ref !== 'string' || payload.ref.length > 1024 || !['tag', 'branch'].includes(payload.ref_type)) return null;
-  return { type: 'create', ...common(payload, deliveryId), ref: payload.ref, ref_type: payload.ref_type };
+  return { type: 'create', ...common(payload, deliveryId), ref: payload.ref, ref_type: payload.ref_type, actor_id: Number.isSafeInteger(payload.sender?.id) && payload.sender.id > 0 ? payload.sender.id : null };
 }
 
 // Returns [{kind, payload}] for the event ledger outbox. `metrics` payloads are completed by the ledger with

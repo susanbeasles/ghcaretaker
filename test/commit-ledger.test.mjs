@@ -14,7 +14,7 @@ function details(n, o = {}) {
 
 function setup({ overrides = {}, alertStatus = () => 204, tagged = () => false, apiFails = () => false } = {}) {
   const now = clock(), storage = sqlStorage(), EVENTS = memoryR2(), alerts = [], lookups = [], tagChecks = [];
-  const env = { EVENTS, ALERT_WEBHOOK_URL: secret('https://alerts.invalid/caretaker') };
+  const env = { PROMOTER_ACTOR_ID: '99', EVENTS, ALERT_WEBHOOK_URL: secret('https://alerts.invalid/caretaker') };
   const core = new CommitLedgerCore(storage, env, {
     now,
     fetcher: async (url, init) => { const status = alertStatus(alerts.length); alerts.push({ url, status, body: JSON.parse(init.body), init }); return new Response(null, { status }); },
@@ -25,6 +25,7 @@ function setup({ overrides = {}, alertStatus = () => 204, tagged = () => false, 
       const n = Number(Object.entries(overrides).find(([, d]) => d.sha === s)?.[0] ?? [...Array(2000).keys()].find(i => sha(i) === s));
       return overrides[n] ?? details(n);
     },
+    promotionTagTarget: async (_r, ref) => { const n = [...Array(2000).keys()].find(i => ref.endsWith(sha(i).slice(0, 12))); return n === undefined ? null : sha(n); },
     hasPromotionTag: async (_r, s) => { tagChecks.push(s); return tagged(s); },
   });
   return { core, storage, EVENTS, now, alerts, lookups, tagChecks };
@@ -32,7 +33,7 @@ function setup({ overrides = {}, alertStatus = () => 204, tagged = () => false, 
 
 const push = (o = {}) => ({ type: 'push', repo_id: REPO, full_name: 'susanbeasles/demo', installation_id: 7, delivery_id: crypto.randomUUID(),
   ref: 'refs/heads/main', before: sha(1), after: sha(2), created: false, deleted: false, forced: false, pusher: 'susanbeasles', commits: [sha(2)], commits_truncated: false, ...o });
-const create = (ref, o = {}) => ({ type: 'create', repo_id: REPO, full_name: 'susanbeasles/demo', installation_id: 7, delivery_id: crypto.randomUUID(), ref, ref_type: 'tag', ...o });
+const create = (ref, o = {}) => ({ type: 'create', repo_id: REPO, full_name: 'susanbeasles/demo', installation_id: 7, delivery_id: crypto.randomUUID(), ref, ref_type: 'tag', actor_id: 99, ...o });
 const kinds = core => core.findings().items.map(f => f.kind).sort();
 const promoTag = (n, pr = 7) => `promote/pr-${pr}-${sha(n).slice(0, 12)}`;
 
@@ -86,7 +87,7 @@ test('unverified main commit and merge commit on main are findings; the same on 
   assert.equal(f.find(x => x.kind === 'main_commit_unverified').entry_seq, 2);
 });
 
-test('main commit without a promote/* tag after 15 minutes is a finding (API-checked); a tag found by the API clears it', async () => {
+test('main commits without authenticated creation evidence are flagged despite name-only API hints', async () => {
   const { core, now, tagChecks, alerts } = setup({ tagged: s => s === sha(3) });
   await core.ingest(push({ before: sha(1), after: sha(2), commits: [sha(2)] }));
   await core.ingest(push({ before: sha(2), after: sha(3), commits: [sha(3)] }));
@@ -94,13 +95,13 @@ test('main commit without a promote/* tag after 15 minutes is a finding (API-che
   now.advance(14 * 60_000); await core.alarm();
   assert.deepEqual(tagChecks, [], 'not before 15 minutes');
   now.advance(2 * 60_000); await core.alarm();
-  assert.deepEqual(tagChecks.sort(), [sha(2), sha(3)].sort());
-  assert.deepEqual(kinds(core), ['main_commit_missing_promotion_tag']);
-  assert.equal(core.findings().items[0].sha, sha(2));
+  assert.deepEqual(tagChecks, [], 'name-only API lookup cannot establish creator');
+  assert.deepEqual(kinds(core), ['main_commit_missing_promotion_tag', 'main_commit_missing_promotion_tag']);
+  assert.ok(core.findings().items.some(f => f.sha === sha(2)));
   assert.ok(alerts.some(a => a.body.code === 'main_commit_missing_promotion_tag'));
   // A late create event does not erase an already-raised finding.
   await core.ingest(create(promoTag(2))); await core.alarm();
-  assert.deepEqual(kinds(core), ['main_commit_missing_promotion_tag']);
+  assert.deepEqual(kinds(core), ['main_commit_missing_promotion_tag', 'main_commit_missing_promotion_tag']);
 });
 
 test('a promote tag seen before the main push (out-of-order delivery) satisfies the check immediately', async () => {
@@ -208,4 +209,150 @@ test('pure rules match the ADR list exactly', () => {
   assert.deepEqual(refFindings(u({ ref: 'refs/tags/x', created: true, before: ZERO }), sha(2)), [], 'same target re-created');
   assert.deepEqual(mainCommitFindings(details(4)), []);
   assert.deepEqual(mainCommitFindings({ ...details(4), verified: undefined }).map(f => f.kind), ['main_commit_unverified']);
+});
+
+for (const beforeMain of [true, false]) test('promotion actor and full target are required, order=' + beforeMain, async () => {
+  for (const scenario of ['wrong_actor', 'wrong_target', 'unconfigured', 'valid']) {
+    const { core, now } = setup();
+    if (scenario === 'unconfigured') delete core.env.PROMOTER_ACTOR_ID;
+    core.deps.promotionTagTarget = async () => scenario === 'wrong_target' ? sha(3) : sha(2);
+    const event = create(promoTag(2), { actor_id: scenario === 'wrong_actor' ? 100 : 99 });
+    if (beforeMain) await core.ingest(event);
+    await core.ingest(push());
+    if (!beforeMain) await core.ingest(event);
+    await core.alarm(); now.advance(16 * 60_000); await core.alarm();
+    assert.equal(core.head().promotions_pending, 0);
+    assert.equal(kinds(core).includes('main_commit_missing_promotion_tag'), scenario !== 'valid', scenario);
+  }
+});
+
+test('absent promotion ref is untrusted evidence and cannot block later pushes', async()=>{
+ const {core,now}=setup();core.deps.promotionTagTarget=async()=>{throw Object.assign(Error('gone'),{code:'github_http_404',status:404});};
+ await core.ingest(create(promoTag(2)));await core.ingest(push());await core.alarm();
+ assert.equal(core.storage.sql.exec('SELECT COUNT(*) AS n FROM inbox').toArray()[0].n,0);
+ assert.ok(core.entries(10).items.some(e=>e.kind==='commit'));
+ now.advance(16*60000);await core.alarm();assert.ok(kinds(core).includes('main_commit_missing_promotion_tag'));
+});
+test('transient promotion lookup preserves ordered retry then recovers',async()=>{
+ const {core,now}=setup();let calls=0;core.deps.promotionTagTarget=async()=>{if(++calls===1)throw Object.assign(Error('down'),{code:'github_http_502',status:502});return sha(2);};
+ await core.ingest(create(promoTag(2)));await core.ingest(push());await core.alarm();assert.equal(core.storage.sql.exec('SELECT COUNT(*) AS n FROM inbox').toArray()[0].n,2);
+ now.advance(3600000);await core.alarm();assert.equal(core.storage.sql.exec('SELECT COUNT(*) AS n FROM inbox').toArray()[0].n,0);assert.equal(core.head().promotions_pending,0);
+});
+
+test('verified promotion lookup uses a SHA and actor index',()=>{
+ const {core}=setup();
+ const plan=core.sql.exec('EXPLAIN QUERY PLAN SELECT tag FROM verified_promote_tags WHERE sha = ? AND actor_id = ? LIMIT 1',sha(2),99).toArray();
+ assert.ok(plan.some(r=>/USING (?:COVERING )?INDEX verified_promote_tags_sha_actor/.test(r.detail)),JSON.stringify(plan));
+ const seek=core.sql.exec('EXPLAIN QUERY PLAN SELECT tag FROM verified_promote_tags WHERE sha = ? AND actor_id = ? AND tag > ? ORDER BY tag LIMIT 1',sha(2),99,'').toArray();
+ assert.ok(seek.some(r=>r.detail.includes('USING COVERING INDEX verified_promote_tags_sha_actor_tag')),JSON.stringify(seek));
+ assert.ok(seek.every(r=>!r.detail.includes('TEMP B-TREE')),JSON.stringify(seek));
+});
+
+test('promotion create deferral preserves ordered inbox even past terminal retry age',async()=>{
+ const {core,now}=setup();let calls=0,mints=0;
+ delete core.deps.promotionTagTarget;
+ core.deps.mintToken=async()=>{mints++;return {token:'synthetic',expires_at:now()+3600000};};
+ core.fetcher=async()=>Response.json({object:++calls%2?{type:'tag',sha:sha(500)}:{type:'commit',sha:sha(2)}});
+ await core.ingest(create(promoTag(2)));await core.ingest(create('ordinary-branch',{ref_type:'branch'}));
+ core.sql.exec('UPDATE inbox SET attempts = 11, queued_at = ?',now()-25*3600000);
+ await core.processInbox({api:0});assert.equal(mints,0);assert.equal(calls,0);
+ const budget={api:2};await core.processInbox(budget);
+ assert.equal(mints,1);assert.equal(calls,1);assert.equal(budget.api,0);
+ const pending=core.sql.exec('SELECT attempts, last_error FROM inbox ORDER BY id').toArray();
+ assert.equal(pending.length,2);assert.equal(pending[0].attempts,11);assert.equal(pending[0].last_error,null);
+ calls=0;await core.processInbox({api:2});
+ assert.equal(mints,1,'cached token costs no request');assert.equal(calls,2);
+ assert.equal(core.sql.exec('SELECT COUNT(*) AS n FROM inbox').one().n,0);
+ assert.equal(core.sql.exec('SELECT COUNT(*) AS n FROM verified_promote_tags').one().n,1);
+});
+
+test('promotion checks share dereference budget and defer without retry penalties or false findings',async()=>{
+ const {core,now}=setup();await core.ingest(push());await core.processInbox({api:40});
+ core.sql.exec('INSERT INTO verified_promote_tags (tag,sha,actor_id,delivery_id) VALUES (?,?,?,?)',promoTag(2),sha(2),99,crypto.randomUUID());
+ now.advance(16*60000);delete core.deps.promotionTagTarget;let calls=0;
+ core.fetcher=async()=>Response.json({object:++calls%2?{type:'tag',sha:sha(500)}:{type:'commit',sha:sha(2)}});
+ const budget={api:1};await core.checkPromotions(budget);
+ assert.equal(calls,1);assert.equal(budget.api,0);
+ const row=core.sql.exec('SELECT status,attempts,last_error FROM promotions WHERE sha = ?',sha(2)).one();
+ assert.deepEqual(row,{status:'pending',attempts:0,last_error:null});assert.deepEqual(kinds(core),[]);
+ calls=0;await core.checkPromotions({api:2});
+ assert.equal(core.sql.exec('SELECT status FROM promotions WHERE sha = ?',sha(2)).one().status,'satisfied');
+});
+
+for (const validLast of [true,false]) test('promotion evidence resumes beyond one alarm budget; valid last='+validLast,async()=>{
+ const {core,now}=setup();await core.ingest(push());await core.processInbox({api:40});
+ const refs=Array.from({length:46},(_,i)=>promoTag(2,100+i));
+ for(const ref of refs)core.sql.exec('INSERT INTO verified_promote_tags (tag,sha,actor_id,delivery_id) VALUES (?,?,?,?)',ref,sha(2),99,crypto.randomUUID());
+ now.advance(16*60000);delete core.deps.promotionTagTarget;const seen=[];
+ core.fetcher=async url=>{seen.push(url);return Response.json({object:{type:'commit',sha:validLast&&url.endsWith(refs.at(-1))?sha(2):sha(3)}});};
+ await core.checkPromotions({api:40});assert.equal(seen.length,40);
+ assert.equal(core.sql.exec('SELECT status FROM promotions').one().status,'pending');
+ assert.equal(core.sql.exec('SELECT last_tag FROM promotion_check_progress').one().last_tag,refs[39]);
+ const resumed=new CommitLedgerCore(core.storage,core.env,{...core.deps,fetcher:core.fetcher});
+ await resumed.checkPromotions({api:40});
+ assert.equal(core.sql.exec('SELECT status FROM promotions').one().status,validLast?'satisfied':'flagged');
+ assert.equal(seen.length,46);assert.equal(new Set(seen).size,46,'completed lookups are not repeated');
+ assert.equal(core.sql.exec('SELECT COUNT(*) AS n FROM promotion_check_progress').one().n,0);
+ assert.equal(core.sql.exec('SELECT attempts FROM promotions').one().attempts,0);
+ assert.deepEqual(kinds(core),validLast?[]:['main_commit_missing_promotion_tag']);
+});
+
+const PROMOTION_MIGRATION = 'migration:exact-promotion-evidence:v1';
+
+test('upgrade reopens legacy satisfied provenance once without rewriting ledger history',async()=>{
+ const {core,storage,now}=setup();
+ await core.ingest(push({after:sha(3),commits:[sha(2),sha(3)]}));await core.processInbox({api:40});
+ for(const [n,source] of [[2,'create_event:'+promoTag(2)],[3,'api']]) {
+  core.sql.exec("UPDATE promotions SET status = 'satisfied', resolved_by = ?, resolved_at = ?, attempts = 7, last_error = 'old', next_check_at = ? WHERE sha = ?",source,core.iso(now()),now()+86400000,sha(n));
+ }
+ core.sql.exec('INSERT INTO promote_tags (tag,prefix,delivery_id,seen_at) VALUES (?,?,?,?)',promoTag(2),sha(2).slice(0,12),crypto.randomUUID(),core.iso(now()));
+ core.sql.exec('INSERT INTO verified_promote_tags (tag,sha,actor_id,delivery_id) VALUES (?,?,?,?)',promoTag(3),sha(3),99,crypto.randomUUID());
+ core.sql.exec('INSERT INTO promotion_check_progress (sha,actor_id,last_tag) VALUES (?,?,?)',sha(3),99,'z');
+ core.sql.exec('DELETE FROM meta WHERE key = ?',PROMOTION_MIGRATION);
+ const entries=core.sql.exec('SELECT * FROM entries ORDER BY seq').toArray(), tags=core.sql.exec('SELECT * FROM promote_tags').toArray();
+ now.advance(16*60000);
+ const upgraded=new CommitLedgerCore(storage,core.env,core.deps);
+ const reopened=core.sql.exec('SELECT status,resolved_by,resolved_at,attempts,last_error,next_check_at,due_at FROM promotions').toArray();
+ assert.equal(reopened.length,2);
+ for(const row of reopened) {
+  assert.equal(row.status,'pending');assert.equal(row.resolved_by,null);assert.equal(row.resolved_at,null);
+  assert.equal(row.attempts,0);assert.equal(row.last_error,null);assert.equal(row.next_check_at,now());assert.ok(row.due_at<now());
+ }
+ assert.equal(core.sql.exec('SELECT COUNT(*) AS n FROM promotion_check_progress').one().n,0);
+ assert.deepEqual(core.sql.exec('SELECT * FROM entries ORDER BY seq').toArray(),entries);
+ assert.deepEqual(core.sql.exec('SELECT * FROM promote_tags').toArray(),tags);
+ await storage.deleteAlarm();await upgraded.initialize();assert.equal(storage.alarmAt,now()+1000);
+ await upgraded.checkPromotions({api:40});
+ assert.equal(core.sql.exec('SELECT status FROM promotions WHERE sha = ?',sha(2)).one().status,'flagged');
+ assert.equal(core.sql.exec('SELECT status FROM promotions WHERE sha = ?',sha(3)).one().status,'satisfied');
+ const settled=core.sql.exec('SELECT * FROM promotions ORDER BY sha').toArray();
+ new CommitLedgerCore(storage,core.env,core.deps);
+ assert.deepEqual(core.sql.exec('SELECT * FROM promotions ORDER BY sha').toArray(),settled);
+ assert.deepEqual(core.sql.exec('SELECT * FROM entries ORDER BY seq').toArray(),entries);
+});
+
+test('fresh verified states survive reopening and migrated work respects grace and batch bounds',async()=>{
+ const {core,storage,now}=setup();await core.ingest(create(promoTag(2)));await core.ingest(push());await core.processInbox({api:40});
+ const verified=core.sql.exec('SELECT * FROM promotions').one();
+ assert.equal(verified.status,'satisfied');new CommitLedgerCore(storage,core.env,core.deps);
+ assert.deepEqual(core.sql.exec('SELECT * FROM promotions').one(),verified);
+ for(let i=3;i<15;i++)core.sql.exec("INSERT INTO promotions (sha,delivery_id,due_at,next_check_at,status,resolved_by) VALUES (?,?,?,?,'satisfied','api')",sha(i),crypto.randomUUID(),now()+60000,now()+60000);
+ core.sql.exec('DELETE FROM meta WHERE key = ?',PROMOTION_MIGRATION);
+ const upgraded=new CommitLedgerCore(storage,core.env,core.deps);
+ await upgraded.checkPromotions({api:40});assert.equal(core.sql.exec("SELECT COUNT(*) AS n FROM promotions WHERE status = 'pending'").one().n,13);
+ now.advance(16*60000);await upgraded.checkPromotions({api:40});
+ assert.equal(core.sql.exec("SELECT COUNT(*) AS n FROM promotions WHERE status = 'pending'").one().n,3);
+ await upgraded.checkPromotions({api:40});assert.equal(core.sql.exec("SELECT COUNT(*) AS n FROM promotions WHERE status = 'pending'").one().n,0);
+});
+
+test('promotion migration marker and invalidation roll back together on failure',async()=>{
+ const {core,storage}=setup();await core.ingest(push());await core.processInbox({api:40});
+ core.sql.exec("UPDATE promotions SET status = 'satisfied', resolved_by = 'api'");
+ core.sql.exec('DELETE FROM meta WHERE key = ?',PROMOTION_MIGRATION);
+ const original=storage.sql.exec;
+ storage.sql.exec=(query,...args)=>{if(query.startsWith('INSERT INTO meta')&&args[0]===PROMOTION_MIGRATION)throw Error('synthetic migration write failure');return original(query,...args);};
+ assert.throws(()=>new CommitLedgerCore(storage,core.env,core.deps),/synthetic migration write failure/);
+ storage.sql.exec=original;
+ assert.equal(core.sql.exec('SELECT status FROM promotions').one().status,'satisfied');assert.equal(core.meta(PROMOTION_MIGRATION),null);
+ new CommitLedgerCore(storage,core.env,core.deps);assert.equal(core.sql.exec('SELECT status FROM promotions').one().status,'pending');
 });

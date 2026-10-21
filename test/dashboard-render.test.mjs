@@ -88,6 +88,8 @@ test('actions: reported and estimated minutes in separate columns, estimates vis
   const row = { repo_id: 42, repo: HOSTILE, workflow: HOSTILE, job: HOSTILE, ...s };
   const page = actionsPage({ days: 7, since: '2026-10-08T12:00:00.000Z', truncated: false, provenance: PROVENANCE, total: s, by_repository: [row], by_workflow: [row], by_job: [row] });
   assertSafe(page, 'actions');
+  assert.match(page, /untrusted reports parsed from job logs/);
+  assert.match(page, /Any job step can forge them/);
   assert.ok(!page.includes(HOSTILE)); assert.ok(page.includes(ESCAPED));
   assert.match(page, /Billable min \(reported\)<\/th><th class="num" scope="col">Minutes \(estimated\)/);
   assert.match(page, /<span class="est">≈ 2\.0<\/span> <abbr class="badge est"/);

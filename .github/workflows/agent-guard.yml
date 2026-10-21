@@ -75,6 +75,7 @@ jobs:
             --output "$scan_dir/gitleaks.tar.gz"
           printf '%s  %s\n' 9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c "$scan_dir/gitleaks.tar.gz" | sha256sum --check -
           tar -xzf "$scan_dir/gitleaks.tar.gz" -C "$scan_dir" gitleaks
+          python3 test/gitleaks-specificity.py "$scan_dir/gitleaks"
           args=(git --redact --no-banner --exit-code 1)
           if [ -n "$BASE_SHA" ] && [ "$BASE_SHA" != 0000000000000000000000000000000000000000 ]; then
             args+=("--log-opts=$BASE_SHA..HEAD")

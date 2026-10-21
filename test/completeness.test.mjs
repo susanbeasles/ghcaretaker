@@ -144,7 +144,7 @@ test('compare failing: retried in place, then recorded as incomplete_push and re
   assert.equal((await core.verify()).ok, true);
 });
 
-test('a range beyond the bounds is incomplete at once and keeps retrying; nothing ever claims it complete', async () => {
+test('a deterministic range bound is terminal and remains incomplete without retry work', async () => {
   const gh = github(); gh.chain(1, 30); gh.failCompare = new GitHubError('compare_too_many_commits');
   const { core, now } = setup(gh);
   await core.ingest(push({ before: sha(1), after: sha(30), commits: range(11, 30), truncated: true }));
@@ -152,7 +152,8 @@ test('a range beyond the bounds is incomplete at once and keeps retrying; nothin
   assert.equal(entries(core)[0].data.complete, false);
   assert.ok(kinds(core).includes('incomplete_push'));
   for (let i = 0; i < 4; i++) { now.advance(3_600_000); await core.alarm(); }
-  assert.ok(outbox(core, 'backfill')[0].attempts >= 4);
+  assert.equal(outbox(core, 'backfill').length, 0);
+  assert.equal(gh.compares.length, 1);
   assert.ok(!entries(core).some(e => e.kind === 'reconcile'));
 });
 
@@ -261,4 +262,15 @@ test('ref reconciliation proves nothing from a capped listing, leaves fresh refs
   const listings = gh.listings; await blocked.core.alarm();
   assert.equal(gh.listings, listings, 'not listed while the inbox is not empty');
   assert.notEqual(blocked.core.meta('refs_reconcile_due_at'), null, 'still due');
+});
+
+test('ref reconciliation bounds preserve an incomplete finding without identical backfill', async () => {
+ const gh=github();gh.chain(1,30);const {core,now}=setup(gh);
+ await core.ingest(push({ref:'refs/heads/feature',after:sha(2),commits:[sha(2)]}));await core.alarm();
+ gh.failCompare=new GitHubError('compare_too_many_commits');
+ const stats={incomplete:0,drift:0,backfilled:0};
+ await core.settleRef('refs/heads/feature',sha(2),sha(30),{baseline:false,previous:sha(2),runId:crypto.randomUUID(),budget:{api:40},stats});
+ assert.equal(stats.incomplete,1);assert.equal(outbox(core,'backfill').length,0);
+ assert.equal(core.findings().items.find(f=>f.kind==='incomplete_push').detail.retrying,false);
+ assert.equal(entries(core).at(-1).data.complete,false);
 });
