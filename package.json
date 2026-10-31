@@ -16,7 +16,7 @@
     "release:package": "node scripts/package-release.mjs"
   },
   "devDependencies": {
-    "wrangler": "4.147.0"
+    "wrangler": "4.156.0"
   },
   "description": "Audited personal GitHub MCP connector: read-only repository contents, scoped collaboration tools.",
   "author": "Anthony Vespoli",
